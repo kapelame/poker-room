@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { ClientMsg, RoomState, ServerMsg } from "@contracts/game";
+import { buildWebSocketUrl } from "@/lib/server-url";
 
 interface PokerStore {
   wsReady: boolean;
@@ -51,8 +52,7 @@ class PokerClient {
         this.ws.readyState === WebSocket.CONNECTING)
     )
       return;
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    const ws = new WebSocket(buildWebSocketUrl());
     this.ws = ws;
     this.intentionalClose = false;
 
@@ -63,7 +63,12 @@ class PokerClient {
       if (this.session) {
         const raw = localStorage.getItem(`poker:session:${this.session.code}`);
         const pid = raw ?? this.session.playerId;
-        this.sendRaw({ t: "join", code: this.session.code, name: this.session.name, playerId: pid });
+        this.sendRaw({
+          t: "join",
+          code: this.session.code,
+          name: this.session.name,
+          playerId: pid,
+        });
       }
     };
     ws.onmessage = (ev) => {

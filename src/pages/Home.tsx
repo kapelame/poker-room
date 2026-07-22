@@ -5,13 +5,32 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import {
   Card,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Spade, Users, Plus, ChevronDown, GraduationCap, LogIn } from "lucide-react";
+import {
+  ChevronDown,
+  GraduationCap,
+  LogIn,
+  Plus,
+  RotateCcw,
+  Settings,
+  Spade,
+  Users,
+} from "lucide-react";
+import { getServerUrl, resetServerUrl, saveServerUrl } from "@/lib/server-url";
 
 export default function Home() {
   const nav = useNavigate();
@@ -22,6 +41,8 @@ export default function Home() {
   const [startingChips, setStartingChips] = useState(1000);
   const [sb, setSb] = useState(5);
   const [bb, setBb] = useState(10);
+  const [serverUrl, setServerUrl] = useState(getServerUrl);
+  const [serverUrlError, setServerUrlError] = useState<string | null>(null);
 
   useEffect(() => {
     poker.connect();
@@ -32,6 +53,22 @@ export default function Home() {
   }, [joined, roomCode, nav]);
 
   const validName = name.trim().length > 0;
+
+  const saveUrl = () => {
+    try {
+      saveServerUrl(serverUrl);
+      window.location.reload();
+    } catch (error) {
+      setServerUrlError(
+        error instanceof Error ? error.message : "服务地址格式不正确",
+      );
+    }
+  };
+
+  const resetUrl = () => {
+    resetServerUrl();
+    window.location.reload();
+  };
 
   const create = () => {
     if (!validName) return;
@@ -50,7 +87,11 @@ export default function Home() {
     if (!validName || code.trim().length < 4) return;
     poker.savedName = name.trim();
     poker.leaveLocal();
-    poker.send({ t: "join", code: code.trim().toUpperCase(), name: name.trim() });
+    poker.send({
+      t: "join",
+      code: code.trim().toUpperCase(),
+      name: name.trim(),
+    });
   };
 
   return (
@@ -64,6 +105,75 @@ export default function Home() {
       <p className="text-emerald-200/70 mb-8">
         创建房间，把链接发给朋友，马上开局 —— 无需注册
       </p>
+
+      <Dialog
+        onOpenChange={(open) => {
+          if (open) {
+            setServerUrl(getServerUrl());
+            setServerUrlError(null);
+          }
+        }}
+      >
+        <DialogTrigger asChild>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="mb-5 text-emerald-200/70 hover:bg-white/10 hover:text-white"
+          >
+            <Settings className="w-4 h-4 mr-1.5" />
+            配置服务地址
+          </Button>
+        </DialogTrigger>
+        <DialogContent className="border-white/10 bg-neutral-950 text-white">
+          <DialogHeader>
+            <DialogTitle>配置服务地址</DialogTitle>
+            <DialogDescription className="text-neutral-400">
+              设置房间服务的 URL。HTTP API 和 WebSocket 会自动使用对应地址。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="server-url" className="text-neutral-300">
+              服务 URL
+            </Label>
+            <Input
+              id="server-url"
+              value={serverUrl}
+              onChange={(event) => {
+                setServerUrl(event.target.value);
+                setServerUrlError(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") saveUrl();
+              }}
+              placeholder="https://poker.example.com"
+              className="border-white/15 bg-white/5 text-white"
+              autoFocus
+            />
+            <p className="text-xs text-neutral-500">
+              支持 http、https、ws、wss；不填协议时默认使用 http。
+            </p>
+            {serverUrlError && (
+              <p className="text-sm text-red-400">{serverUrlError}</p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={resetUrl}
+              className="border-white/15 bg-transparent text-neutral-300 hover:bg-white/10 hover:text-white"
+            >
+              <RotateCcw className="w-4 h-4 mr-1.5" />
+              恢复当前站点
+            </Button>
+            <Button
+              onClick={saveUrl}
+              className="bg-emerald-600 hover:bg-emerald-700"
+            >
+              保存并重连
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {kicked && (
         <div className="mb-4 px-4 py-2 rounded-lg bg-red-500/20 border border-red-500/40 text-red-300 text-sm">

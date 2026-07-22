@@ -45,6 +45,8 @@ npm run build
 
 复制 `.env.example` 为 `.env` 后按需修改。默认 Docker Compose 配置使用本地 MySQL；共享部署或公网部署时，请务必替换 `APP_SECRET` 和数据库密码，并通过部署平台的密钥管理功能注入，不要把 `.env` 提交到 Git。
 
+前端运行后，可在首页点击“配置服务地址”，设置房间后端的 URL。配置会保存在当前浏览器中，HTTP API 和 WebSocket 地址会自动从该 URL 生成；点击“恢复当前站点”可切回同源服务。
+
 ## 项目结构
 
 - `src/`：React 页面和组件
