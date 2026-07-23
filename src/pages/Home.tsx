@@ -35,7 +35,8 @@ import { getServerUrl, resetServerUrl, saveServerUrl } from "@/lib/server-url";
 export default function Home() {
   const nav = useNavigate();
   const { joined, roomCode, kicked } = usePoker();
-  const [name, setName] = useState(poker.savedName);
+  const [createName, setCreateName] = useState(poker.savedName);
+  const [joinName, setJoinName] = useState(poker.savedName);
   const [code, setCode] = useState("");
   const [showAdv, setShowAdv] = useState(false);
   const [startingChips, setStartingChips] = useState("1000");
@@ -54,7 +55,8 @@ export default function Home() {
     if (joined && roomCode) nav(`/room/${roomCode}`);
   }, [joined, roomCode, nav]);
 
-  const validName = name.trim().length > 0;
+  const validCreateName = createName.trim().length > 0;
+  const validJoinName = joinName.trim().length > 0;
 
   const saveUrl = () => {
     try {
@@ -73,7 +75,7 @@ export default function Home() {
   };
 
   const create = () => {
-    if (!validName) return;
+    if (!validCreateName) return;
     const chips = Number(startingChips);
     const smallBlind = Number(sb);
     const bigBlind = Number(bb);
@@ -95,11 +97,11 @@ export default function Home() {
       return;
     }
     setCreateError(null);
-    poker.savedName = name.trim();
+    poker.savedName = createName.trim();
     poker.leaveLocal();
     poker.send({
       t: "create",
-      name: name.trim(),
+      name: createName.trim(),
       startingChips: chips,
       sb: smallBlind,
       bb: bigBlind,
@@ -108,13 +110,13 @@ export default function Home() {
   };
 
   const join = () => {
-    if (!validName || code.trim().length < 4) return;
-    poker.savedName = name.trim();
+    if (!validJoinName || code.trim().length < 4) return;
+    poker.savedName = joinName.trim();
     poker.leaveLocal();
     poker.send({
       t: "join",
       code: code.trim().toUpperCase(),
-      name: name.trim(),
+      name: joinName.trim(),
     });
   };
 
@@ -226,8 +228,8 @@ export default function Home() {
             <div className="space-y-1.5">
               <Label className="text-neutral-300">你的昵称</Label>
               <Input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
+                value={createName}
+                onChange={(e) => setCreateName(e.target.value)}
                 placeholder="例如：赌神"
                 maxLength={16}
                 className="bg-white/5 border-white/15 text-white"
@@ -304,7 +306,7 @@ export default function Home() {
             )}
             <Button
               onClick={create}
-              disabled={!validName}
+              disabled={!validCreateName}
               className="w-full bg-amber-500 hover:bg-amber-600 text-black font-bold h-11"
             >
               创建房间
@@ -326,8 +328,8 @@ export default function Home() {
             <div className="space-y-1.5">
               <Label className="text-neutral-300">你的昵称</Label>
               <Input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
+                value={joinName}
+                onChange={(e) => setJoinName(e.target.value)}
                 placeholder="例如：小白"
                 maxLength={16}
                 className="bg-white/5 border-white/15 text-white"
@@ -345,7 +347,7 @@ export default function Home() {
             </div>
             <Button
               onClick={join}
-              disabled={!validName || code.trim().length < 4}
+              disabled={!validJoinName || code.trim().length < 4}
               className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold h-11"
             >
               <LogIn className="w-4 h-4 mr-1" /> 加入房间
