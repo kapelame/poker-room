@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { poker, usePoker } from "@/hooks/usePoker";
-import type { PublicPlayer, RoomState } from "@contracts/game";
+import type {
+  BuyInMode,
+  PublicPlayer,
+  RebuyRequest,
+  RoomState,
+} from "@contracts/game";
 import { Seat } from "@/components/poker/Seat";
 import { PlayingCard } from "@/components/poker/PlayingCard";
 import { ActionBar } from "@/components/poker/ActionBar";
@@ -235,9 +240,12 @@ export default function Room() {
         s.pendingBuyIns.some((request) => request.playerId === p.id)),
   ).length;
   const inLobby = s.phase === "waiting";
-  const myRebuyPending = s.rebuyRequests.some((r) => r.playerId === playerId);
-  const myBuyInPending = s.pendingBuyIns.some((r) => r.playerId === playerId);
-  const canRebuy = me != null && !myRebuyPending && !myBuyInPending;
+  const myRebuyRequest = s.rebuyRequests.find(
+    (request) => request.playerId === playerId,
+  );
+  const myApprovedBuyIn = s.pendingBuyIns.find(
+    (request) => request.playerId === playerId,
+  );
   const canShowCards =
     s.phase === "showdown" &&
     me != null &&
@@ -334,11 +342,11 @@ export default function Room() {
               ))}
             </div>
             <div className="mt-4 text-center text-xs text-neutral-400">
-              盲注 {s.sb}/{s.bb} · 初始筹码 {s.startingChips.toLocaleString()}
+              盲注 {s.sb}/{s.bb} · 初始筹码 {s.startingChips.toLocaleString()} ·
+              一手买入 {s.buyInAmount.toLocaleString()}
             </div>
           </div>
 
-          {isHost && <RebuyApprovals state={s} />}
           {isHost && (
             <DecisionTimeSetting
               value={decisionSetting}
@@ -362,13 +370,6 @@ export default function Room() {
               <div className="text-neutral-300 animate-pulse">
                 等待房主开始游戏…
               </div>
-            )}
-            {(canRebuy || myRebuyPending || myBuyInPending) && (
-              <RebuyRequestButton
-                pending={myRebuyPending}
-                approved={myBuyInPending}
-                amount={s.startingChips}
-              />
             )}
           </div>
         </div>
@@ -521,11 +522,11 @@ export default function Room() {
         {isHost && <RebuyApprovals state={s} />}
         <div className="w-full max-w-xl mx-auto flex flex-col items-center gap-2">
           {me && (
-            <RebuyRequestButton
-              pending={myRebuyPending}
-              approved={myBuyInPending}
-              amount={s.startingChips}
-              compact
+            <BuyInRequestPanel
+              state={s}
+              playerId={playerId!}
+              pending={myRebuyRequest}
+              approved={myApprovedBuyIn}
             />
           )}
           {myTurn ? (
@@ -807,23 +808,34 @@ function DecisionTimeSetting({
   );
 }
 
-/* ---------- 买入申请按钮（破产玩家） ---------- */
-function RebuyRequestButton({
+/* ---------- 买入申请 ---------- */
+const BUY_IN_MODE_LABEL: Record<BuyInMode, string> = {
+  custom: "自定义",
+  oneHand: "买入一手",
+  average: "均码",
+  leader: "对齐领先",
+};
+
+function BuyInRequestPanel({
+  state,
+  playerId,
   pending,
   approved,
-  amount,
-  compact = false,
 }: {
-  pending: boolean;
-  approved: boolean;
-  amount: number;
-  compact?: boolean;
+  state: RoomState;
+  playerId: string;
+  pending?: RebuyRequest;
+  approved?: RebuyRequest;
 }) {
+  const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<BuyInMode>("oneHand");
+  const [customAmount, setCustomAmount] = useState(String(state.buyInAmount));
+
   if (pending) {
     return (
       <div className="flex items-center gap-3">
         <span className="text-amber-300 text-sm animate-pulse">
-          买入申请已发送，等待房主审批…
+          买入申请已发送（{pending.amount.toLocaleString()}），等待房主审批…
         </span>
         <Button
           variant="outline"
@@ -839,20 +851,128 @@ function RebuyRequestButton({
   if (approved) {
     return (
       <span className="text-emerald-300 text-sm animate-pulse">
-        买入已批准，将在下一手到账（{amount.toLocaleString()} 筹码）
+        买入已批准，将在下一手到账（{approved.amount.toLocaleString()} 筹码）
       </span>
     );
   }
-  return (
-    <Button
-      size={compact ? "sm" : "default"}
-      className="bg-emerald-600 hover:bg-emerald-700 font-bold px-4 sm:px-8"
-      onClick={() => poker.send({ t: "rebuy" })}
-    >
-      <Coins className="w-4 h-4 mr-1.5" />
-      申请买入（{amount.toLocaleString()}）
-    </Button>
+
+  const me = state.players.find((player) => player.id === playerId);
+  if (!me) return null;
+  const stacks = state.players
+    .filter((player) => player.connected && player.chips > 0)
+    .map((player) => player.chips);
+  const averageStack = stacks.length
+    ? Math.floor(stacks.reduce((sum, chips) => sum + chips, 0) / stacks.length)
+    : state.buyInAmount;
+  const leaderStack = state.players.reduce(
+    (max, player) => Math.max(max, player.chips),
+    me.chips,
   );
+  const amounts: Record<BuyInMode, number> = {
+    custom: Number(customAmount),
+    oneHand: state.buyInAmount,
+    average: averageStack - me.chips,
+    leader: leaderStack - me.chips,
+  };
+  const selectedAmount = amounts[mode];
+  const validAmount = Number.isInteger(selectedAmount) && selectedAmount >= 100;
+
+  const submit = () => {
+    if (!validAmount) return;
+    poker.send({
+      t: "rebuy",
+      mode,
+      amount: mode === "custom" ? selectedAmount : undefined,
+    });
+    setOpen(false);
+  };
+
+  if (!open) {
+    return (
+      <Button
+        size="sm"
+        className="bg-emerald-600 hover:bg-emerald-700 font-bold px-4"
+        onClick={() => setOpen(true)}
+      >
+        <Coins className="w-4 h-4 mr-1.5" />
+        申请买入
+      </Button>
+    );
+  }
+
+  return (
+    <div className="w-full max-w-xl rounded-xl border border-emerald-400/30 bg-black/55 px-3 py-2">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-xs text-neutral-300">选择买入方式</span>
+        <span className="text-[11px] text-neutral-500">通过后下一手到账</span>
+      </div>
+      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+        {(Object.keys(BUY_IN_MODE_LABEL) as BuyInMode[]).map((option) => (
+          <button
+            key={option}
+            type="button"
+            className={
+              "rounded-lg border px-2 py-1.5 text-left transition-colors " +
+              (mode === option
+                ? "border-emerald-400 bg-emerald-500/20 text-emerald-200"
+                : "border-white/10 bg-white/5 text-neutral-300 hover:bg-white/10")
+            }
+            onClick={() => setMode(option)}
+          >
+            <div className="text-xs font-bold">{BUY_IN_MODE_LABEL[option]}</div>
+            <div className="text-[10px] text-neutral-400">
+              {option === "custom"
+                ? "输入金额"
+                : selectedAmountForMode(amounts[option])}
+            </div>
+          </button>
+        ))}
+      </div>
+      {mode === "custom" && (
+        <Input
+          type="number"
+          min={100}
+          value={customAmount}
+          onChange={(event) => setCustomAmount(event.target.value)}
+          placeholder="输入买入金额"
+          className="mt-2 h-9 border-white/15 bg-white/5 text-white"
+        />
+      )}
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <span className="text-xs text-neutral-400">
+          本次买入：
+          <b className={validAmount ? "text-emerald-300" : "text-red-300"}>
+            {Number.isFinite(selectedAmount)
+              ? selectedAmount.toLocaleString()
+              : "无效金额"}
+          </b>
+        </span>
+        <div className="flex gap-1.5">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 border-white/15 text-neutral-300 hover:bg-white/10"
+            onClick={() => setOpen(false)}
+          >
+            取消
+          </Button>
+          <Button
+            size="sm"
+            disabled={!validAmount}
+            className="h-8 bg-emerald-600 font-bold hover:bg-emerald-700"
+            onClick={submit}
+          >
+            提交申请
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function selectedAmountForMode(amount: number) {
+  if (!Number.isFinite(amount) || amount <= 0) return "当前无需补充";
+  return `+${amount.toLocaleString()}`;
 }
 
 /* ---------- 快捷表情 ---------- */
@@ -930,40 +1050,63 @@ function RebuyApprovals({ state }: { state: RoomState }) {
   if (!state.rebuyRequests.length) return null;
   return (
     <div className="w-full max-w-xl mx-auto mb-2 space-y-1.5">
-      {state.rebuyRequests.map((r) => (
-        <div
-          key={r.playerId}
-          className="flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-500/15 border border-amber-400/40 animate-card-in"
-        >
-          <Coins className="w-4 h-4 text-amber-300 shrink-0" />
-          <span className="flex-1 text-sm truncate">
-            <b className="text-amber-200">{r.name}</b>
-            <span className="text-neutral-300">
-              {" "}
-              申请买入 {state.startingChips.toLocaleString()} 筹码
-            </span>
-          </span>
-          <Button
-            size="sm"
-            className="bg-emerald-600 hover:bg-emerald-700 h-7 px-3 font-bold"
-            onClick={() =>
-              poker.send({ t: "rebuyApprove", playerId: r.playerId })
-            }
-          >
-            同意
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className="border-red-500/50 text-red-400 hover:bg-red-500/10 h-7 px-3"
-            onClick={() =>
-              poker.send({ t: "rebuyReject", playerId: r.playerId })
-            }
-          >
-            拒绝
-          </Button>
-        </div>
+      {state.rebuyRequests.map((request) => (
+        <RebuyApprovalRow key={request.playerId} request={request} />
       ))}
+    </div>
+  );
+}
+
+function RebuyApprovalRow({ request }: { request: RebuyRequest }) {
+  const [value, setValue] = useState(String(request.amount));
+  const amount = Number(value);
+  const valid =
+    Number.isInteger(amount) && amount >= 100 && amount <= 1_000_000;
+
+  return (
+    <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-500/15 border border-amber-400/40 animate-card-in">
+      <Coins className="w-4 h-4 text-amber-300 shrink-0" />
+      <span className="flex-1 text-sm truncate">
+        <b className="text-amber-200">{request.name}</b>
+        <span className="text-neutral-300">
+          {" "}
+          申请{BUY_IN_MODE_LABEL[request.mode]}{" "}
+          {request.amount.toLocaleString()} 筹码
+        </span>
+      </span>
+      <Input
+        type="number"
+        min={100}
+        max={1_000_000}
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        className="h-7 w-24 border-white/15 bg-white/5 px-2 text-center text-xs text-white"
+        title="房主可以修改最终买入金额"
+      />
+      <Button
+        size="sm"
+        disabled={!valid}
+        className="bg-emerald-600 hover:bg-emerald-700 h-7 px-3 font-bold"
+        onClick={() =>
+          poker.send({
+            t: "rebuyApprove",
+            playerId: request.playerId,
+            amount,
+          })
+        }
+      >
+        同意
+      </Button>
+      <Button
+        size="sm"
+        variant="outline"
+        className="border-red-500/50 text-red-400 hover:bg-red-500/10 h-7 px-3"
+        onClick={() =>
+          poker.send({ t: "rebuyReject", playerId: request.playerId })
+        }
+      >
+        拒绝
+      </Button>
     </div>
   );
 }

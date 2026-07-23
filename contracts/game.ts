@@ -61,11 +61,14 @@ export interface ScoreEntry {
 }
 
 /** 待审批的买入请求 */
+export type BuyInMode = "custom" | "oneHand" | "average" | "leader";
+
 export interface RebuyRequest {
   playerId: string;
   name: string;
   at: number; // 请求时间戳
   amount: number;
+  mode: BuyInMode;
 }
 
 export interface EmoteEvent {
@@ -90,6 +93,7 @@ export interface RoomState {
   sb: number;
   bb: number;
   startingChips: number;
+  buyInAmount: number; // “买入一手”默认金额
   handNumber: number;
   log: string[];
   nextHandIn?: number; // 距下一手秒数（结算阶段）
@@ -109,6 +113,7 @@ export type ClientMsg =
       t: "create";
       name: string;
       startingChips?: number;
+      buyInAmount?: number;
       sb?: number;
       bb?: number;
       decisionTimeSec?: number;
@@ -116,9 +121,9 @@ export type ClientMsg =
   | { t: "join"; code: string; name: string; playerId?: string }
   | { t: "start" }
   | { t: "action"; action: ActionType; amount?: number }
-  | { t: "rebuy" } // 申请重新买入（房主直接生效，其他人需房主审批）
+  | { t: "rebuy"; mode?: BuyInMode; amount?: number } // 申请买入
   | { t: "rebuyCancel" } // 取消自己的买入申请
-  | { t: "rebuyApprove"; playerId: string } // 房主批准
+  | { t: "rebuyApprove"; playerId: string; amount?: number } // 房主批准，可覆盖金额
   | { t: "rebuyReject"; playerId: string } // 房主拒绝
   | { t: "setDecisionTime"; seconds: number } // 房主设置每次决策时间
   | { t: "show"; indices: number[] } // 摊牌阶段亮牌（0/1 为两张手牌的下标）

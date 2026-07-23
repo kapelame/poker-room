@@ -116,6 +116,12 @@ function handleMessage(ws: WebSocket, raw: string) {
         .slice(0, 16);
       if (!name) return sendError(ws, "请输入昵称");
       const startingChips = clamp(msg.startingChips ?? 1000, 100, 100000, 1000);
+      const buyInAmount = clamp(
+        msg.buyInAmount ?? startingChips,
+        100,
+        100000,
+        startingChips,
+      );
       const sb = clamp(msg.sb ?? 5, 1, 10000, 5);
       const bb = clamp(msg.bb ?? 10, 2, 20000, 10);
       const decisionTimeSec = clamp(
@@ -127,11 +133,14 @@ function handleMessage(ws: WebSocket, raw: string) {
       if (bb <= sb) return sendError(ws, "大盲必须大于小盲");
       if (startingChips < bb * 10)
         return sendError(ws, "初始筹码至少为大盲的 10 倍");
+      if (buyInAmount < bb * 10)
+        return sendError(ws, "一手买入金额至少为大盲的 10 倍");
 
       const code = genCode();
       const playerId = randomUUID();
       const room = new PokerRoom(code, playerId, {
         startingChips,
+        buyInAmount,
         sb,
         bb,
         decisionTimeSec,
@@ -174,7 +183,8 @@ function handleMessage(ws: WebSocket, raw: string) {
         .slice(0, 16);
       if (!name) return sendError(ws, "请输入昵称");
       const playerId = randomUUID();
-      room.addPlayer(playerId, name);
+      const joiningDuringGame = room.phase !== "waiting";
+      room.addPlayer(playerId, name, { funded: !joiningDuringGame });
       clients.set(ws, { roomCode: code, playerId, alive: true });
       cancelRoomCleanup(code);
       send(ws, { t: "joined", code, playerId, state: room.toJSON(playerId) });
@@ -206,7 +216,11 @@ function handleMessage(ws: WebSocket, raw: string) {
     case "rebuy": {
       const ctx = roomOf(ws);
       if (!ctx) return sendError(ws, "未加入房间");
-      const err = ctx.room.requestRebuy(ctx.info.playerId);
+      const modes = new Set(["custom", "oneHand", "average", "leader"]);
+      const mode = modes.has(String(msg.mode))
+        ? (msg.mode ?? "oneHand")
+        : "oneHand";
+      const err = ctx.room.requestRebuy(ctx.info.playerId, mode, msg.amount);
       if (err) sendError(ws, err);
       break;
     }
@@ -221,7 +235,11 @@ function handleMessage(ws: WebSocket, raw: string) {
     case "rebuyApprove": {
       const ctx = roomOf(ws);
       if (!ctx) return sendError(ws, "未加入房间");
-      const err = ctx.room.approveRebuy(ctx.info.playerId, msg.playerId);
+      const err = ctx.room.approveRebuy(
+        ctx.info.playerId,
+        msg.playerId,
+        msg.amount,
+      );
       if (err) sendError(ws, err);
       break;
     }

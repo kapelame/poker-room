@@ -420,6 +420,7 @@ describe("德州扑克引擎", () => {
     });
     room.addPlayer("p0", "房主");
     room.addPlayer("p1", "玩家1");
+    room.startHand();
     room.byId("p1")!.chips = 0; // 模拟破产
 
     // 玩家1申请
@@ -450,7 +451,8 @@ describe("德州扑克引擎", () => {
     expect(room.byId("p1")!.chips).toBe(0);
     expect(room.toJSON("p0").pendingBuyIns).toHaveLength(1);
 
-    // 下一手开始时才到账，此时还要扣除盲注。
+    // 当前手结束后，下一手开始时才到账。
+    room.applyAction("p0", "fold");
     room.startHand();
     expect(room.byId("p1")!.chips).toBeGreaterThan(0);
 
@@ -462,7 +464,7 @@ describe("德州扑克引擎", () => {
     const entry = s.scoreboard.find((e) => e.playerId === "p1")!;
     expect(entry.buyIns).toBe(2);
     expect(entry.totalBuyIn).toBe(2000);
-    expect(entry.profit).toBe(-1010); // 下一手已支付 10 大盲
+    expect(entry.profit).toBeGreaterThan(-1000);
     room.dispose();
   });
 
@@ -503,7 +505,11 @@ describe("德州扑克引擎", () => {
     expect(during.players.find((p) => p.id === newcomer.id)?.inHand).toBe(
       false,
     );
+    expect(during.players.find((p) => p.id === newcomer.id)?.chips).toBe(0);
     expect(during.players.find((p) => p.id === newcomer.id)?.hole).toEqual([]);
+    expect(during.rebuyRequests).toHaveLength(1);
+    expect(during.rebuyRequests[0].playerId).toBe(newcomer.id);
+    expect(during.rebuyRequests[0].mode).toBe("oneHand");
     room.dispose();
   });
 
@@ -540,13 +546,48 @@ describe("德州扑克引擎", () => {
     });
     room.addPlayer("p0", "房主");
     room.addPlayer("p1", "玩家1");
+    room.startHand();
     const before = room.byId("p1")!.chips;
     expect(room.requestRebuy("p1")).toBeNull();
-    expect(room.approveRebuy("p0", "p1")).toBeNull();
+    expect(room.approveRebuy("p0", "p1", 1200)).toBeNull();
     expect(room.byId("p1")!.chips).toBe(before);
+    room.applyAction("p0", "fold");
     room.startHand();
-    expect(room.byId("p1")!.chips).toBeLessThan(before + room.startingChips);
+    expect(room.byId("p1")!.chips).toBeGreaterThan(before);
     expect(room.toJSON("p0").pendingBuyIns).toHaveLength(0);
+    room.dispose();
+  });
+
+  it("大厅阶段不能申请买入，游戏中支持四种金额模式", () => {
+    const room = new PokerRoom("TEST06", "p0", {
+      startingChips: 1000,
+      buyInAmount: 800,
+      sb: 5,
+      bb: 10,
+    });
+    room.addPlayer("p0", "房主");
+    room.addPlayer("p1", "玩家1");
+    expect(room.requestRebuy("p1")).toContain("游戏开始后");
+
+    room.startHand();
+    room.byId("p1")!.chips = 0;
+    expect(room.requestRebuy("p1", "oneHand")).toBeNull();
+    expect(room.toJSON("p0").rebuyRequests[0].amount).toBe(800);
+    room.cancelRebuy("p1");
+
+    room.byId("p0")!.chips = 1500;
+    room.byId("p1")!.chips = 500;
+    expect(room.requestRebuy("p1", "average")).toBeNull();
+    expect(room.toJSON("p0").rebuyRequests[0].amount).toBe(500);
+    room.cancelRebuy("p1");
+
+    expect(room.requestRebuy("p1", "leader")).toBeNull();
+    expect(room.toJSON("p0").rebuyRequests[0].amount).toBe(1000);
+    room.cancelRebuy("p1");
+
+    expect(room.requestRebuy("p1", "custom", 1234)).toBeNull();
+    expect(room.approveRebuy("p0", "p1", 1500)).toBeNull();
+    expect(room.toJSON("p0").pendingBuyIns[0].amount).toBe(1500);
     room.dispose();
   });
 });

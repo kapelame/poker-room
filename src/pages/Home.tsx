@@ -28,6 +28,7 @@ export default function Home() {
   const [code, setCode] = useState("");
   const [showAdv, setShowAdv] = useState(false);
   const [startingChips, setStartingChips] = useState("1000");
+  const [buyInAmount, setBuyInAmount] = useState("1000");
   const [sb, setSb] = useState("5");
   const [bb, setBb] = useState("10");
   const [decisionTimeSec, setDecisionTimeSec] = useState("30");
@@ -47,22 +48,26 @@ export default function Home() {
   const create = () => {
     if (!validCreateName) return;
     const chips = Number(startingChips);
+    const oneHandBuyIn = Number(buyInAmount);
     const smallBlind = Number(sb);
     const bigBlind = Number(bb);
     const decisionTime = Number(decisionTimeSec);
     if (
       !Number.isInteger(chips) ||
+      !Number.isInteger(oneHandBuyIn) ||
       !Number.isInteger(smallBlind) ||
       !Number.isInteger(bigBlind) ||
       !Number.isInteger(decisionTime) ||
       chips < 100 ||
+      oneHandBuyIn < 100 ||
       smallBlind < 1 ||
       bigBlind <= smallBlind ||
       chips < bigBlind * 10 ||
+      oneHandBuyIn < bigBlind * 10 ||
       decisionTime < 5
     ) {
       setCreateError(
-        "请检查筹码、盲注和决策时间：大盲需大于小盲，决策时间至少 5 秒",
+        "请检查初始筹码、一手买入、盲注和决策时间：两种筹码都需至少为大盲的 10 倍",
       );
       return;
     }
@@ -73,6 +78,7 @@ export default function Home() {
       t: "create",
       name: createName.trim(),
       startingChips: chips,
+      buyInAmount: oneHandBuyIn,
       sb: smallBlind,
       bb: bigBlind,
       decisionTimeSec: decisionTime,
@@ -146,7 +152,7 @@ export default function Home() {
               高级设置（筹码 / 盲注）
             </button>
             {showAdv && (
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
                 <div className="space-y-1">
                   <Label className="text-xs text-neutral-400">初始筹码</Label>
                   <Input
@@ -155,6 +161,19 @@ export default function Home() {
                     min={100}
                     onChange={(e) => {
                       setStartingChips(e.target.value);
+                      setCreateError(null);
+                    }}
+                    className="bg-white/5 border-white/15 text-white"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs text-neutral-400">一手买入</Label>
+                  <Input
+                    type="number"
+                    value={buyInAmount}
+                    min={100}
+                    onChange={(e) => {
+                      setBuyInAmount(e.target.value);
                       setCreateError(null);
                     }}
                     className="bg-white/5 border-white/15 text-white"

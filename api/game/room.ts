@@ -1,5 +1,6 @@
 import type {
   ActionType,
+  BuyInMode,
   Card,
   Phase,
   PotInfo,
@@ -49,6 +50,8 @@ const AUTO_ACTION_DELAY = 600;
 const DEFAULT_DECISION_TIME_SEC = 30;
 const MIN_DECISION_TIME_SEC = 5;
 const MAX_DECISION_TIME_SEC = 300;
+const MIN_BUY_IN_AMOUNT = 100;
+const MAX_BUY_IN_AMOUNT = 1_000_000;
 
 function createDeck(): Card[] {
   const suits: Suit[] = ["s", "h", "d", "c"];
@@ -70,6 +73,7 @@ export class PokerRoom {
   sb: number;
   bb: number;
   startingChips: number;
+  buyInAmount: number;
 
   private deck: Card[] = [];
   community: Card[] = [];
@@ -108,6 +112,7 @@ export class PokerRoom {
     hostId: string,
     opts: {
       startingChips: number;
+      buyInAmount?: number;
       sb: number;
       bb: number;
       decisionTimeSec?: number;
@@ -116,6 +121,13 @@ export class PokerRoom {
     this.code = code;
     this.hostId = hostId;
     this.startingChips = opts.startingChips;
+    this.buyInAmount = Math.min(
+      MAX_BUY_IN_AMOUNT,
+      Math.max(
+        MIN_BUY_IN_AMOUNT,
+        Math.floor(opts.buyInAmount ?? opts.startingChips),
+      ),
+    );
     this.sb = opts.sb;
     this.bb = opts.bb;
     this.decisionTimeSec = Math.min(
@@ -177,7 +189,12 @@ export class PokerRoom {
 
   /* ---------------- 房间管理 ---------------- */
 
-  addPlayer(id: string, name: string): Player {
+  addPlayer(
+    id: string,
+    name: string,
+    options: { funded?: boolean } = {},
+  ): Player {
+    const funded = options.funded ?? this.phase === "waiting";
     const used = new Set(this.players.map((p) => p.seat));
     let seat = 0;
     while (used.has(seat)) seat++;
@@ -185,7 +202,7 @@ export class PokerRoom {
       id,
       name,
       seat,
-      chips: this.startingChips,
+      chips: funded ? this.startingChips : 0,
       bet: 0,
       handBet: 0,
       folded: false,
@@ -200,10 +217,11 @@ export class PokerRoom {
     this.stats.set(id, {
       hands: 0,
       wins: 0,
-      buyIns: 1,
-      totalBuyIn: this.startingChips,
+      buyIns: funded ? 1 : 0,
+      totalBuyIn: funded ? this.startingChips : 0,
     });
-    this.log(`${name} 加入了牌桌`);
+    this.log(funded ? `${name} 加入了牌桌` : `${name} 加入牌桌，等待买入审批`);
+    if (!funded && this.phase !== "waiting") this.requestRebuy(id, "oneHand");
     return p;
   }
 
@@ -757,7 +775,7 @@ export class PokerRoom {
     this.onChange();
   }
 
-  /* ---------------- 重新买入（需房主审批） ---------------- */
+  /* ---------------- 买入（需房主审批） ---------------- */
 
   /** 买入申请可以随时提交，但到账必须等下一手开始。 */
   private rebuyEligible(p: Player): string | null {
@@ -766,41 +784,98 @@ export class PokerRoom {
     return null;
   }
 
+  private validateBuyInAmount(amount: number): number | string {
+    if (!Number.isFinite(amount)) return "买入金额格式不正确";
+    const value = Math.floor(amount);
+    if (value < MIN_BUY_IN_AMOUNT) return `买入金额至少为 ${MIN_BUY_IN_AMOUNT}`;
+    if (value > MAX_BUY_IN_AMOUNT)
+      return `买入金额不能超过 ${MAX_BUY_IN_AMOUNT.toLocaleString()}`;
+    return value;
+  }
+
+  private averageStack(): number {
+    const stacks = this.players
+      .filter((p) => p.connected && p.chips > 0)
+      .map((p) => p.chips);
+    if (!stacks.length) return this.buyInAmount;
+    return Math.floor(
+      stacks.reduce((sum, chips) => sum + chips, 0) / stacks.length,
+    );
+  }
+
+  private resolveBuyInAmount(
+    p: Player,
+    mode: BuyInMode = "oneHand",
+    customAmount?: number,
+  ): number | string {
+    let amount: number;
+    switch (mode) {
+      case "custom":
+        amount = customAmount ?? Number.NaN;
+        break;
+      case "average":
+        amount = this.averageStack() - p.chips;
+        break;
+      case "leader": {
+        const leader = this.players.reduce(
+          (max, player) => Math.max(max, player.chips),
+          p.chips,
+        );
+        amount = leader - p.chips;
+        break;
+      }
+      case "oneHand":
+      default:
+        amount = this.buyInAmount;
+        break;
+    }
+    if (amount <= 0 && mode !== "custom") return "当前筹码已达到目标，无需买入";
+    return this.validateBuyInAmount(amount);
+  }
+
   /**
-   * 申请买入：普通玩家进入待房主审批队列；房主在非牌局阶段可直接买入。
+   * 申请买入：游戏开始后才能申请；普通玩家进入待房主审批队列，
+   * 房主申请后直接登记，所有买入都在下一手开始时到账。
    * 当前手进行中时，即使已经批准，也不会改变当前手的筹码。
    */
-  requestRebuy(id: string): string | null {
+  requestRebuy(
+    id: string,
+    mode: BuyInMode = "oneHand",
+    customAmount?: number,
+  ): string | null {
     const p = this.byId(id);
     if (!p) return "玩家不存在";
+    if (this.phase === "waiting") return "游戏开始后才能申请买入";
     const err = this.rebuyEligible(p);
     if (err) return err;
+    const amount = this.resolveBuyInAmount(p, mode, customAmount);
+    if (typeof amount === "string") return amount;
+    const request: RebuyRequest = {
+      playerId: id,
+      name: p.name,
+      at: Date.now(),
+      amount,
+      mode,
+    };
     if (id === this.hostId) {
-      const request: RebuyRequest = {
-        playerId: id,
-        name: p.name,
-        at: Date.now(),
-        amount: this.startingChips,
-      };
       this.pendingBuyIns.set(id, request);
-      this.log(`${p.name} 买入已登记，将在下一手到账`);
+      this.log(`${p.name} 买入 ${amount} 已登记，将在下一手到账`);
       this.scheduleNextHandIfReady();
       this.onChange();
       return null;
     }
-    this.pendingRebuy.set(id, {
-      playerId: id,
-      name: p.name,
-      at: Date.now(),
-      amount: this.startingChips,
-    });
-    this.log(`${p.name} 申请重新买入，等待房主审批`);
+    this.pendingRebuy.set(id, request);
+    this.log(`${p.name} 申请买入 ${amount}，等待房主审批`);
     this.onChange();
     return null;
   }
 
-  /** 房主批准买入。返回 null 或错误信息。 */
-  approveRebuy(hostId: string, playerId: string): string | null {
+  /** 房主批准买入，可覆盖申请金额。返回 null 或错误信息。 */
+  approveRebuy(
+    hostId: string,
+    playerId: string,
+    customAmount?: number,
+  ): string | null {
     if (hostId !== this.hostId) return "只有房主可以审批买入";
     const req = this.pendingRebuy.get(playerId);
     if (!req) return "该买入申请不存在";
@@ -809,8 +884,19 @@ export class PokerRoom {
     if (!p) return "玩家已离开";
     const err = this.rebuyEligible(p);
     if (err) return err;
-    this.pendingBuyIns.set(playerId, req);
-    this.log(`${p.name} 的买入申请已批准，将在下一手到账`);
+    let approved = req;
+    if (customAmount !== undefined) {
+      const amount = this.validateBuyInAmount(customAmount);
+      if (typeof amount === "string") {
+        this.pendingRebuy.set(playerId, req);
+        return amount;
+      }
+      approved = { ...req, amount, mode: "custom" };
+    }
+    this.pendingBuyIns.set(playerId, approved);
+    this.log(
+      `${p.name} 的买入申请已批准（${approved.amount}），将在下一手到账`,
+    );
     this.scheduleNextHandIfReady();
     this.onChange();
     return null;
@@ -953,6 +1039,7 @@ export class PokerRoom {
       sb: this.sb,
       bb: this.bb,
       startingChips: this.startingChips,
+      buyInAmount: this.buyInAmount,
       handNumber: this.handNumber,
       log: this.logLines.slice(-40),
       nextHandIn: this.nextHandAt
