@@ -65,6 +65,11 @@ export function ActionBar({ state, me, secondsRemaining }: Props) {
                 {secondsRemaining}s
               </span>
             )}
+            {me.timeBankRemaining > 0 && (
+              <span className="text-xs text-amber-300">
+                银行 {me.timeBankRemaining}s
+              </span>
+            )}
             <span className="text-2xl font-bold text-amber-400">
               {target.toLocaleString()}
             </span>
@@ -116,9 +121,16 @@ export function ActionBar({ state, me, secondsRemaining }: Props) {
 
   return (
     <div className="w-full max-w-xl mx-auto flex gap-2">
-      {secondsRemaining != null && (
-        <div className="absolute -mt-7 right-4 text-xs font-bold text-red-300">
-          剩余 {secondsRemaining} 秒
+      {(secondsRemaining != null || me.timeBankRemaining > 0) && (
+        <div className="absolute -mt-7 right-4 flex gap-2 text-xs font-bold">
+          {secondsRemaining != null && (
+            <span className="text-red-300">剩余 {secondsRemaining} 秒</span>
+          )}
+          {me.timeBankRemaining > 0 && (
+            <span className="text-amber-300">
+              银行 {me.timeBankRemaining} 秒
+            </span>
+          )}
         </div>
       )}
       <Button

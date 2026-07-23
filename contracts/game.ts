@@ -39,6 +39,7 @@ export interface PublicPlayer {
   handName?: string; // 摊牌牌型名
   winAmount?: number; // 本手赢得筹码
   isWinner?: boolean;
+  timeBankRemaining: number; // 本手剩余时间银行秒数
 }
 
 export interface PotInfo {
@@ -79,6 +80,14 @@ export interface EmoteEvent {
   at: number;
 }
 
+export interface ChatMessage {
+  id: string;
+  playerId: string;
+  name: string;
+  text: string;
+  at: number;
+}
+
 export interface RoomState {
   code: string;
   phase: Phase;
@@ -94,9 +103,10 @@ export interface RoomState {
   bb: number;
   startingChips: number;
   buyInAmount: number; // “买入一手”默认金额
+  timeBankSec: number; // 每手时间银行总秒数
+  paused: boolean;
   handNumber: number;
   log: string[];
-  nextHandIn?: number; // 距下一手秒数（结算阶段）
   decisionTimeSec: number; // 每次行动的决策时间
   turnDeadline?: number; // 当前行动截止时间（Unix ms）
   scoreboard: ScoreEntry[]; // 记分板（盈亏降序）
@@ -117,6 +127,7 @@ export type ClientMsg =
       sb?: number;
       bb?: number;
       decisionTimeSec?: number;
+      timeBankSec?: number;
     }
   | { t: "join"; code: string; name: string; playerId?: string }
   | { t: "start" }
@@ -126,8 +137,11 @@ export type ClientMsg =
   | { t: "rebuyApprove"; playerId: string; amount?: number } // 房主批准，可覆盖金额
   | { t: "rebuyReject"; playerId: string } // 房主拒绝
   | { t: "setDecisionTime"; seconds: number } // 房主设置每次决策时间
+  | { t: "setTimeBank"; seconds: number } // 房主设置每手时间银行
+  | { t: "setPaused"; paused: boolean } // 房主暂停/继续
   | { t: "show"; indices: number[] } // 摊牌阶段亮牌（0/1 为两张手牌的下标）
   | { t: "emote"; emoji: string } // 向房间发送一个表情
+  | { t: "chat"; text: string } // 向房间发送文字消息
   | { t: "kick"; playerId: string }
   | { t: "leave" };
 
@@ -137,6 +151,7 @@ export type ServerMsg =
   | { t: "joined"; code: string; playerId: string; state: RoomState }
   | { t: "state"; state: RoomState }
   | { t: "emote"; event: EmoteEvent }
+  | { t: "chat"; message: ChatMessage }
   | { t: "error"; message: string }
   | { t: "kicked" };
 

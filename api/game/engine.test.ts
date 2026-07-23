@@ -184,6 +184,7 @@ describe("德州扑克引擎", () => {
       startingChips: chips,
       sb: 5,
       bb: 10,
+      timeBankSec: 0,
     });
     for (let i = 0; i < n; i++) room.addPlayer(`p${i}`, `玩家${i}`);
     room.startHand();
@@ -378,7 +379,7 @@ describe("德州扑克引擎", () => {
     room.dispose();
   });
 
-  it("重新买入与下一手自动开始", async () => {
+  it("重新买入后由房主手动开始下一手", async () => {
     const room = makeRoom(2);
     room.byId("p1")!.chips = 10; // p1 只剩 10
     // p0(庄/小盲) 全下，p1 跟注全下
@@ -404,8 +405,8 @@ describe("德州扑克引擎", () => {
       expect(s.players.find((p) => p.id === loser.id)!.chips).toBe(0);
       expect(s.pendingBuyIns).toHaveLength(1);
     }
-    // 7 秒后自动开始下一手
-    await vi.advanceTimersByTimeAsync(7000);
+    // 不会自动开始，房主手动开始下一手。
+    room.startHand();
     s = room.toJSON("p0");
     expect(s.handNumber).toBe(2);
     expect(["preflop", "flop", "turn", "river", "showdown"]).toContain(s.phase);
@@ -488,8 +489,8 @@ describe("德州扑克引擎", () => {
     // 记分板按盈亏降序
     expect(s.scoreboard[0].playerId).toBe("p2");
 
-    // 第二手后所有在场者手数+1
-    await vi.advanceTimersByTimeAsync(7000);
+    // 房主手动开始第二手。
+    room.startHand();
     s = room.toJSON("p0");
     expect(s.handNumber).toBe(2);
     for (const e of s.scoreboard) expect(e.hands).toBe(2);
@@ -520,6 +521,56 @@ describe("德州扑克引擎", () => {
     const state = room.toJSON("p1");
     expect(state.phase).toBe("showdown");
     expect(state.log.some((line) => line.includes("超时自动"))).toBe(true);
+    room.dispose();
+  });
+
+  it("房主暂停后计时和行动都会停止，继续后恢复", async () => {
+    const room = makeRoom(2);
+    expect(room.setDecisionTime("p0", 5)).toBeNull();
+    const before = room.toJSON("p0");
+    expect(room.setPaused("p1", true)).toContain("只有房主");
+    expect(room.setPaused("p0", true)).toBeNull();
+    let paused = room.toJSON("p0");
+    expect(paused.paused).toBe(true);
+    expect(paused.turnSeat).toBe(before.turnSeat);
+    expect(paused.turnDeadline).toBeUndefined();
+    expect(room.applyAction("p0", "fold")).toContain("暂停");
+
+    await vi.advanceTimersByTimeAsync(10000);
+    paused = room.toJSON("p0");
+    expect(paused.phase).toBe("preflop");
+    expect(paused.turnSeat).toBe(before.turnSeat);
+
+    expect(room.setPaused("p0", false)).toBeNull();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(room.toJSON("p0").turnSeat).not.toBe(before.turnSeat);
+    room.dispose();
+  });
+
+  it("基础决策时间用完后自动进入时间银行", async () => {
+    const room = new PokerRoom("TEST07", "p0", {
+      startingChips: 1000,
+      sb: 5,
+      bb: 10,
+      decisionTimeSec: 5,
+      timeBankSec: 5,
+    });
+    room.addPlayer("p0", "房主");
+    room.addPlayer("p1", "玩家1");
+    room.startHand();
+
+    await vi.advanceTimersByTimeAsync(5000);
+    let state = room.toJSON("p0");
+    expect(state.phase).toBe("preflop");
+    expect(state.turnSeat).toBe(0);
+    expect(state.players.find((p) => p.id === "p0")!.timeBankRemaining).toBe(5);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    state = room.toJSON("p0");
+    expect(
+      state.players.find((p) => p.id === "p0")!.timeBankRemaining,
+    ).toBeLessThan(5);
+    expect(room.applyAction("p0", "fold")).toBeNull();
     room.dispose();
   });
 

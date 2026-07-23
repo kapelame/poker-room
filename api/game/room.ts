@@ -34,6 +34,7 @@ export interface Player {
   winAmount?: number;
   isWinner?: boolean;
   score?: number;
+  timeBankRemaining: number;
 }
 
 /** 记分板统计（跨手累计，玩家离房后清除） */
@@ -44,12 +45,13 @@ interface PlayerStats {
   totalBuyIn: number; // 累计买入筹码
 }
 
-const NEXT_HAND_DELAY = 7000;
 const RUNOUT_DELAY = 1400;
 const AUTO_ACTION_DELAY = 600;
 const DEFAULT_DECISION_TIME_SEC = 30;
 const MIN_DECISION_TIME_SEC = 5;
 const MAX_DECISION_TIME_SEC = 300;
+const DEFAULT_TIME_BANK_SEC = 30;
+const MAX_TIME_BANK_SEC = 300;
 const MIN_BUY_IN_AMOUNT = 100;
 const MAX_BUY_IN_AMOUNT = 1_000_000;
 
@@ -74,6 +76,8 @@ export class PokerRoom {
   bb: number;
   startingChips: number;
   buyInAmount: number;
+  timeBankSec: number;
+  paused = false;
 
   private deck: Card[] = [];
   community: Card[] = [];
@@ -84,9 +88,10 @@ export class PokerRoom {
   turnSeat = -1;
   handNumber = 0;
   private logLines: string[] = [];
-  private nextHandAt?: number;
   private timers: ReturnType<typeof setTimeout>[] = [];
   decisionTimeSec: number;
+  private turnUsesTimeBank = false;
+  private pausedTurn?: { remainingMs: number; usingTimeBank: boolean };
   private turnDeadlineAt?: number;
   private pendingRemoval = new Set<string>();
 
@@ -116,6 +121,7 @@ export class PokerRoom {
       sb: number;
       bb: number;
       decisionTimeSec?: number;
+      timeBankSec?: number;
     },
   ) {
     this.code = code;
@@ -136,6 +142,10 @@ export class PokerRoom {
         MIN_DECISION_TIME_SEC,
         Math.floor(opts.decisionTimeSec ?? DEFAULT_DECISION_TIME_SEC),
       ),
+    );
+    this.timeBankSec = Math.min(
+      MAX_TIME_BANK_SEC,
+      Math.max(0, Math.floor(opts.timeBankSec ?? DEFAULT_TIME_BANK_SEC)),
     );
   }
 
@@ -212,6 +222,7 @@ export class PokerRoom {
       shown: [],
       inHand: false,
       hasActed: false,
+      timeBankRemaining: this.timeBankSec,
     };
     this.players.push(p);
     this.stats.set(id, {
@@ -316,20 +327,78 @@ export class PokerRoom {
     return null;
   }
 
+  setTimeBank(hostId: string, seconds: number): string | null {
+    if (hostId !== this.hostId) return "只有房主可以设置时间银行";
+    if (!Number.isFinite(seconds)) return "时间银行格式不正确";
+    const value = Math.min(MAX_TIME_BANK_SEC, Math.max(0, Math.floor(seconds)));
+    this.timeBankSec = value;
+    if (this.phase === "waiting") {
+      for (const p of this.players) p.timeBankRemaining = value;
+    }
+    this.log("房主将每手时间银行设置为 " + value + " 秒");
+    this.onChange();
+    return null;
+  }
+
+  setPaused(hostId: string, paused: boolean): string | null {
+    if (hostId !== this.hostId) return "只有房主可以暂停或继续游戏";
+    if (paused === this.paused) return null;
+
+    const activePhase = ["preflop", "flop", "turn", "river"].includes(
+      this.phase,
+    );
+    if (paused) {
+      if (!activePhase) return "当前没有进行中的牌局";
+      if (this.turnSeat < 0 || !this.turnDeadlineAt)
+        return "当前正在处理牌面，请稍后再暂停";
+      const current = this.bySeat(this.turnSeat);
+      if (!current) return "当前行动玩家不存在";
+      const remainingMs = Math.max(0, this.turnDeadlineAt - Date.now());
+      if (this.turnUsesTimeBank) {
+        current.timeBankRemaining = Math.max(0, Math.ceil(remainingMs / 1000));
+      }
+      this.pausedTurn = {
+        remainingMs,
+        usingTimeBank: this.turnUsesTimeBank,
+      };
+      this.clearTimers();
+      this.turnDeadlineAt = undefined;
+      this.paused = true;
+      this.log("房主暂停了牌局");
+    } else {
+      this.paused = false;
+      const current = this.bySeat(this.turnSeat);
+      const saved = this.pausedTurn;
+      this.pausedTurn = undefined;
+      if (current && activePhase) {
+        this.startTurn(
+          current,
+          saved?.remainingMs,
+          saved?.usingTimeBank ?? false,
+        );
+      }
+      this.log("房主继续了牌局");
+    }
+    this.onChange();
+    return null;
+  }
+
   /* ---------------- 游戏流程 ---------------- */
 
-  startHand() {
-    if (this.phase !== "waiting" && this.phase !== "showdown") return;
+  startHand(): string | null {
+    if (this.paused) return "牌局已暂停，请先点击继续";
+    if (this.phase !== "waiting" && this.phase !== "showdown") return null;
     this.clearTimers();
-    this.nextHandAt = undefined;
     this.turnDeadlineAt = undefined;
+    this.turnUsesTimeBank = false;
+    this.pausedTurn = undefined;
     this.finalizePendingRemovals();
     this.applyPendingBuyIns();
     const eligible = this.players.filter((p) => p.chips > 0 && p.connected);
     if (eligible.length < 2) {
       this.phase = "waiting";
       this.onChange();
-      return;
+      return null;
     }
 
     this.handNumber++;
@@ -354,6 +423,7 @@ export class PokerRoom {
       p.winAmount = undefined;
       p.isWinner = undefined;
       p.score = undefined;
+      p.timeBankRemaining = this.timeBankSec;
     }
     for (const p of eligible) {
       p.inHand = true;
@@ -393,10 +463,11 @@ export class PokerRoom {
     // 盲注已让所有人全下的极端情况：直接跑牌
     if (this.roundComplete()) {
       this.nextStreet();
-      return;
+      return null;
     }
     this.startTurn(first);
     this.onChange();
+    return null;
   }
 
   private postBlind(p: Player, amount: number, label: string) {
@@ -412,10 +483,12 @@ export class PokerRoom {
   applyAction(id: string, action: ActionType, amount?: number): string | null {
     const p = this.byId(id);
     if (!p) return "玩家不存在";
+    if (this.paused) return "牌局已暂停，请等待房主继续";
     if (p.seat !== this.turnSeat) return "还没轮到你";
     if (!["preflop", "flop", "turn", "river"].includes(this.phase))
       return "当前不能行动";
 
+    this.consumeTurnTimeBank(p);
     const toCall = this.currentBet - p.bet;
 
     switch (action) {
@@ -496,6 +569,7 @@ export class PokerRoom {
     }
     p.hasActed = true;
     this.turnDeadlineAt = undefined;
+    this.turnUsesTimeBank = false;
     this.advance();
     return null;
   }
@@ -633,6 +707,7 @@ export class PokerRoom {
   }
 
   private scheduleAutoAction(p: Player) {
+    if (this.paused) return;
     this.later(() => {
       if (this.turnSeat !== p.seat) return;
       if (!["preflop", "flop", "turn", "river"].includes(this.phase)) return;
@@ -651,27 +726,54 @@ export class PokerRoom {
     }, AUTO_ACTION_DELAY);
   }
 
-  private startTurn(p: Player) {
+  private consumeTurnTimeBank(p: Player) {
+    if (!this.turnUsesTimeBank || !this.turnDeadlineAt) return;
+    p.timeBankRemaining = Math.max(
+      0,
+      Math.ceil((this.turnDeadlineAt - Date.now()) / 1000),
+    );
+  }
+
+  private startTurn(
+    p: Player,
+    durationMs = this.decisionTimeSec * 1000,
+    usingTimeBank = false,
+  ) {
+    if (this.paused) return;
     this.turnSeat = p.seat;
-    const deadline = Date.now() + this.decisionTimeSec * 1000;
+    this.turnUsesTimeBank = usingTimeBank;
+    const deadline = Date.now() + Math.max(1, durationMs);
     this.turnDeadlineAt = deadline;
-    this.later(() => {
-      if (this.turnSeat !== p.seat || this.turnDeadlineAt !== deadline) return;
-      if (!["preflop", "flop", "turn", "river"].includes(this.phase)) return;
-      this.turnDeadlineAt = undefined;
-      const toCall = this.currentBet - p.bet;
-      if (toCall <= 0) {
-        p.lastAction = "看牌";
-        p.hasActed = true;
-        this.log(`${p.name} 看牌（超时自动）`);
-      } else {
-        p.folded = true;
-        p.lastAction = "弃牌";
-        p.hasActed = true;
-        this.log(`${p.name} 弃牌（超时自动）`);
-      }
-      this.advance();
-    }, this.decisionTimeSec * 1000);
+    this.later(
+      () => {
+        if (this.turnSeat !== p.seat || this.turnDeadlineAt !== deadline)
+          return;
+        if (!["preflop", "flop", "turn", "river"].includes(this.phase)) return;
+        if (!usingTimeBank && p.timeBankRemaining > 0) {
+          p.lastAction = "时间银行";
+          this.log(p.name + " 用完基础时间，启用时间银行");
+          this.startTurn(p, p.timeBankRemaining * 1000, true);
+          this.onChange();
+          return;
+        }
+        if (usingTimeBank) p.timeBankRemaining = 0;
+        this.turnDeadlineAt = undefined;
+        this.turnUsesTimeBank = false;
+        const toCall = this.currentBet - p.bet;
+        if (toCall <= 0) {
+          p.lastAction = "看牌";
+          p.hasActed = true;
+          this.log(`${p.name} 看牌（超时自动）`);
+        } else {
+          p.folded = true;
+          p.lastAction = "弃牌";
+          p.hasActed = true;
+          this.log(`${p.name} 弃牌（超时自动）`);
+        }
+        this.advance();
+      },
+      Math.max(1, durationMs),
+    );
     if (!p.connected) this.scheduleAutoAction(p);
   }
 
@@ -770,8 +872,6 @@ export class PokerRoom {
       p.shown = p.hole.map(() => true);
     }
     this.finalizePendingRemovals();
-    // 自动开始下一手；已批准的买入也算作下一手的入局资格。
-    this.scheduleNextHandIfReady();
     this.onChange();
   }
 
@@ -860,7 +960,6 @@ export class PokerRoom {
     if (id === this.hostId) {
       this.pendingBuyIns.set(id, request);
       this.log(`${p.name} 买入 ${amount} 已登记，将在下一手到账`);
-      this.scheduleNextHandIfReady();
       this.onChange();
       return null;
     }
@@ -897,7 +996,6 @@ export class PokerRoom {
     this.log(
       `${p.name} 的买入申请已批准（${approved.amount}），将在下一手到账`,
     );
-    this.scheduleNextHandIfReady();
     this.onChange();
     return null;
   }
@@ -919,19 +1017,6 @@ export class PokerRoom {
       const p = this.byId(id);
       if (p) this.log(`${p.name} 取消了买入申请`);
       this.onChange();
-    }
-  }
-
-  private scheduleNextHandIfReady() {
-    const canContinue = this.players.filter(
-      (x) => x.connected && (x.chips > 0 || this.pendingBuyIns.has(x.id)),
-    ).length;
-    if (canContinue >= 2 && this.phase === "showdown" && !this.nextHandAt) {
-      this.nextHandAt = Date.now() + NEXT_HAND_DELAY;
-      this.later(() => {
-        this.nextHandAt = undefined;
-        this.startHand();
-      }, NEXT_HAND_DELAY);
     }
   }
 
@@ -1023,6 +1108,15 @@ export class PokerRoom {
             atShowdown && (isViewer || bothShown) ? p.handName : undefined,
           winAmount: p.winAmount,
           isWinner: p.isWinner,
+          timeBankRemaining:
+            p.id === this.bySeat(this.turnSeat)?.id &&
+            this.turnUsesTimeBank &&
+            this.turnDeadlineAt
+              ? Math.max(
+                  0,
+                  Math.ceil((this.turnDeadlineAt - Date.now()) / 1000),
+                )
+              : p.timeBankRemaining,
         };
       });
     return {
@@ -1040,11 +1134,10 @@ export class PokerRoom {
       bb: this.bb,
       startingChips: this.startingChips,
       buyInAmount: this.buyInAmount,
+      timeBankSec: this.timeBankSec,
+      paused: this.paused,
       handNumber: this.handNumber,
       log: this.logLines.slice(-40),
-      nextHandIn: this.nextHandAt
-        ? Math.max(0, Math.ceil((this.nextHandAt - Date.now()) / 1000))
-        : undefined,
       decisionTimeSec: this.decisionTimeSec,
       turnDeadline: this.turnDeadlineAt,
       scoreboard: this.buildScoreboard(),

@@ -32,6 +32,7 @@ export default function Home() {
   const [sb, setSb] = useState("5");
   const [bb, setBb] = useState("10");
   const [decisionTimeSec, setDecisionTimeSec] = useState("30");
+  const [timeBankSec, setTimeBankSec] = useState("30");
   const [createError, setCreateError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -52,22 +53,26 @@ export default function Home() {
     const smallBlind = Number(sb);
     const bigBlind = Number(bb);
     const decisionTime = Number(decisionTimeSec);
+    const timeBank = Number(timeBankSec);
     if (
       !Number.isInteger(chips) ||
       !Number.isInteger(oneHandBuyIn) ||
       !Number.isInteger(smallBlind) ||
       !Number.isInteger(bigBlind) ||
       !Number.isInteger(decisionTime) ||
+      !Number.isInteger(timeBank) ||
       chips < 100 ||
       oneHandBuyIn < 100 ||
       smallBlind < 1 ||
       bigBlind <= smallBlind ||
       chips < bigBlind * 10 ||
       oneHandBuyIn < bigBlind * 10 ||
-      decisionTime < 5
+      decisionTime < 5 ||
+      timeBank < 0 ||
+      timeBank > 300
     ) {
       setCreateError(
-        "请检查初始筹码、一手买入、盲注和决策时间：两种筹码都需至少为大盲的 10 倍",
+        "请检查筹码、盲注、决策时间和时间银行：时间银行需为 0-300 秒",
       );
       return;
     }
@@ -82,6 +87,7 @@ export default function Home() {
       sb: smallBlind,
       bb: bigBlind,
       decisionTimeSec: decisionTime,
+      timeBankSec: timeBank,
     });
   };
 
@@ -152,7 +158,7 @@ export default function Home() {
               高级设置（筹码 / 盲注）
             </button>
             {showAdv && (
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
                 <div className="space-y-1">
                   <Label className="text-xs text-neutral-400">初始筹码</Label>
                   <Input
@@ -214,6 +220,20 @@ export default function Home() {
                     max={300}
                     onChange={(e) => {
                       setDecisionTimeSec(e.target.value);
+                      setCreateError(null);
+                    }}
+                    className="bg-white/5 border-white/15 text-white"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs text-neutral-400">时间银行</Label>
+                  <Input
+                    type="number"
+                    value={timeBankSec}
+                    min={0}
+                    max={300}
+                    onChange={(e) => {
+                      setTimeBankSec(e.target.value);
                       setCreateError(null);
                     }}
                     className="bg-white/5 border-white/15 text-white"

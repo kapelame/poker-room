@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router";
 import { poker, usePoker } from "@/hooks/usePoker";
 import type {
   BuyInMode,
+  ChatMessage,
   PublicPlayer,
   RebuyRequest,
   RoomState,
@@ -89,12 +90,13 @@ export default function Room() {
     lastError,
     kicked,
     emotes,
+    chatMessages,
   } = usePoker();
   const [name, setName] = useState(poker.savedName);
   const [copied, setCopied] = useState<"code" | "link" | null>(null);
   const [now, setNow] = useState(Date.now());
   const [decisionSetting, setDecisionSetting] = useState("30");
-  const nextHandAtRef = useRef<number>(0);
+  const [timeBankSetting, setTimeBankSetting] = useState("30");
   const joinTriedRef = useRef(false);
   const lastTurnSoundRef = useRef("");
   const isMobile = useIsMobile();
@@ -138,27 +140,20 @@ export default function Room() {
   }, []);
 
   useEffect(() => {
-    if (state?.nextHandIn != null) {
-      nextHandAtRef.current = Date.now() + state.nextHandIn * 1000;
-    }
-  }, [state?.nextHandIn]);
-
-  useEffect(() => {
     if (state?.decisionTimeSec != null) {
       setDecisionSetting(String(state.decisionTimeSec));
     }
-  }, [state?.decisionTimeSec]);
+    if (state?.timeBankSec != null) {
+      setTimeBankSetting(String(state.timeBankSec));
+    }
+  }, [state?.decisionTimeSec, state?.timeBankSec]);
 
   const me = state?.players.find((p) => p.id === playerId);
-
-  const countdown = useMemo(() => {
-    if (state?.nextHandIn == null) return null;
-    return Math.max(0, Math.ceil((nextHandAtRef.current - now) / 1000));
-  }, [state?.nextHandIn, now]);
 
   const myTurn =
     me != null &&
     state?.turnSeat === me.seat &&
+    !state.paused &&
     ["preflop", "flop", "turn", "river"].includes(state.phase);
 
   const decisionCountdown = useMemo(() => {
@@ -278,6 +273,15 @@ export default function Room() {
     poker.send({ t: "setDecisionTime", seconds });
   };
 
+  const saveTimeBank = () => {
+    const seconds = Number(timeBankSetting);
+    if (!Number.isInteger(seconds) || seconds < 0 || seconds > 300) {
+      toast.error("时间银行需设置为 0 到 300 秒");
+      return;
+    }
+    poker.send({ t: "setTimeBank", seconds });
+  };
+
   /* ---------- 大厅 ---------- */
   if (inLobby) {
     return (
@@ -352,6 +356,9 @@ export default function Room() {
               value={decisionSetting}
               onChange={setDecisionSetting}
               onSave={saveDecisionTime}
+              bankValue={timeBankSetting}
+              onBankChange={setTimeBankSetting}
+              onBankSave={saveTimeBank}
             />
           )}
 
@@ -415,8 +422,17 @@ export default function Room() {
                 value={decisionSetting}
                 onChange={setDecisionSetting}
                 onSave={saveDecisionTime}
+                bankValue={timeBankSetting}
+                onBankChange={setTimeBankSetting}
+                onBankSave={saveTimeBank}
                 compact
               />
+            )}
+            {isHost && <PauseControl paused={s.paused} />}
+            {!isHost && s.paused && (
+              <span className="rounded-md bg-amber-500/15 px-2 py-1 text-xs text-amber-200">
+                牌局已暂停
+              </span>
             )}
           </>
         }
@@ -460,18 +476,13 @@ export default function Room() {
                   {w.handName ? `（${w.handName}）` : ""}
                 </div>
               ))}
-              {countdown != null && (
-                <div className="text-neutral-300 text-sm mt-1">
-                  下一手 {countdown}s
-                </div>
-              )}
               {isHost && (
                 <Button
                   size="sm"
                   className="mt-2 bg-amber-500 text-black font-bold"
                   onClick={() => poker.send({ t: "start" })}
                 >
-                  立即开始下一手
+                  开始下一手
                 </Button>
               )}
             </div>
@@ -535,10 +546,14 @@ export default function Room() {
               me={me!}
               secondsRemaining={decisionCountdown ?? undefined}
             />
+          ) : s.paused ? (
+            <div className="flex min-h-12 items-center justify-center text-sm text-amber-200">
+              牌局已暂停，等待房主继续…
+            </div>
           ) : s.phase === "showdown" ? (
             <div className="flex items-center gap-4 flex-wrap justify-center min-h-12">
               <span className="text-neutral-400 text-sm">
-                {countdown != null ? `下一手 ${countdown}s…` : "等待下一手…"}
+                等待房主开始下一手…
               </span>
               {canShowCards && <ShowCardToggle me={me!} />}
             </div>
@@ -556,6 +571,7 @@ export default function Room() {
             </div>
           )}
           <QuickEmotes />
+          <QuickChat messages={chatMessages} />
         </div>
       </div>
     </div>
@@ -771,11 +787,17 @@ function DecisionTimeSetting({
   value,
   onChange,
   onSave,
+  bankValue,
+  onBankChange,
+  onBankSave,
   compact = false,
 }: {
   value: string;
   onChange: (value: string) => void;
   onSave: () => void;
+  bankValue: string;
+  onBankChange: (value: string) => void;
+  onBankSave: () => void;
   compact?: boolean;
 }) {
   return (
@@ -786,7 +808,7 @@ function DecisionTimeSetting({
           : "flex items-center gap-2 rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm"
       }
     >
-      <span>{compact ? "决策" : "每次决策时间"}</span>
+      <span>{compact ? "行动" : "每次决策"}</span>
       <Input
         type="number"
         min={5}
@@ -804,7 +826,44 @@ function DecisionTimeSetting({
         }
       />
       <span>秒</span>
+      <span className={compact ? "ml-1" : "ml-2"}>
+        {compact ? "银行" : "时间银行"}
+      </span>
+      <Input
+        type="number"
+        min={0}
+        max={300}
+        value={bankValue}
+        onChange={(event) => onBankChange(event.target.value)}
+        onBlur={onBankSave}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") onBankSave();
+        }}
+        className={
+          compact
+            ? "h-7 w-14 border-white/15 bg-white/5 px-1 text-center text-xs text-white"
+            : "h-8 w-20 border-white/15 bg-white/5 px-2 text-center text-white"
+        }
+      />
+      <span>秒</span>
     </div>
+  );
+}
+
+function PauseControl({ paused }: { paused: boolean }) {
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      className={
+        paused
+          ? "h-7 border-emerald-400/50 text-emerald-300 hover:bg-emerald-500/10"
+          : "h-7 border-amber-400/50 text-amber-300 hover:bg-amber-500/10"
+      }
+      onClick={() => poker.send({ t: "setPaused", paused: !paused })}
+    >
+      {paused ? "继续" : "暂停"}
+    </Button>
   );
 }
 
@@ -992,6 +1051,91 @@ function QuickEmotes() {
           {emoji}
         </button>
       ))}
+    </div>
+  );
+}
+
+/* ---------- 文字聊天 ---------- */
+const QUICK_CHAT_PHRASES = ["跟注", "看牌", "我弃牌", "等一下", "Nice", "GG"];
+
+function QuickChat({ messages }: { messages: ChatMessage[] }) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  const send = (text: string) => {
+    const value = text.trim();
+    if (!value) return;
+    poker.send({ t: "chat", text: value });
+    setDraft("");
+  };
+
+  if (!open) {
+    return (
+      <Button
+        size="sm"
+        variant="outline"
+        className="h-8 rounded-full border-white/15 bg-black/35 px-4 text-xs text-neutral-300 hover:bg-white/10"
+        onClick={() => setOpen(true)}
+      >
+        聊天
+      </Button>
+    );
+  }
+
+  return (
+    <div className="w-full max-w-xl rounded-xl border border-white/10 bg-black/60 p-2">
+      <div className="mb-2 flex max-h-28 flex-col gap-1 overflow-y-auto px-1 text-left text-xs">
+        {messages.length ? (
+          messages.slice(-8).map((message) => (
+            <div key={message.id} className="truncate text-neutral-300">
+              <b className="text-emerald-300">{message.name}</b>
+              <span className="mx-1 text-neutral-600">:</span>
+              {message.text}
+            </div>
+          ))
+        ) : (
+          <span className="text-neutral-500">还没有聊天消息</span>
+        )}
+      </div>
+      <div className="mb-2 grid grid-cols-3 gap-1.5 sm:grid-cols-6">
+        {QUICK_CHAT_PHRASES.map((phrase) => (
+          <button
+            key={phrase}
+            type="button"
+            className="rounded-md border border-white/10 bg-white/5 px-1.5 py-1 text-[11px] text-neutral-300 hover:bg-white/10"
+            onClick={() => send(phrase)}
+          >
+            {phrase}
+          </button>
+        ))}
+      </div>
+      <div className="flex gap-1.5">
+        <Input
+          value={draft}
+          maxLength={120}
+          placeholder="输入消息…"
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") send(draft);
+          }}
+          className="h-8 border-white/15 bg-white/5 text-xs text-white"
+        />
+        <Button
+          size="sm"
+          className="h-8 bg-emerald-600 px-3 text-xs font-bold hover:bg-emerald-700"
+          onClick={() => send(draft)}
+        >
+          发送
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-8 px-2 text-xs text-neutral-400 hover:bg-white/10 hover:text-white"
+          onClick={() => setOpen(false)}
+        >
+          收起
+        </Button>
+      </div>
     </div>
   );
 }

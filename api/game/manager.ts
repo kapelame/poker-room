@@ -3,7 +3,12 @@ import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
 import { randomInt, randomUUID } from "node:crypto";
 import { PokerRoom } from "./room";
-import type { ClientMsg, EmoteEvent, ServerMsg } from "../../contracts/game";
+import type {
+  ChatMessage,
+  ClientMsg,
+  EmoteEvent,
+  ServerMsg,
+} from "../../contracts/game";
 import { MAX_PLAYERS } from "../../contracts/game";
 
 /** 任何能监听 upgrade 事件的 HTTP(S) server（Node http / Vite dev server 均可） */
@@ -26,6 +31,7 @@ const emptyTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 const ROOM_IDLE_TTL = 10 * 60 * 1000;
 const DEFAULT_DECISION_TIME_SEC = 30;
+const DEFAULT_TIME_BANK_SEC = 30;
 
 const ALLOWED_EMOTES = new Set([
   "💩",
@@ -130,6 +136,12 @@ function handleMessage(ws: WebSocket, raw: string) {
         300,
         DEFAULT_DECISION_TIME_SEC,
       );
+      const timeBankSec = clamp(
+        msg.timeBankSec ?? DEFAULT_TIME_BANK_SEC,
+        0,
+        300,
+        DEFAULT_TIME_BANK_SEC,
+      );
       if (bb <= sb) return sendError(ws, "大盲必须大于小盲");
       if (startingChips < bb * 10)
         return sendError(ws, "初始筹码至少为大盲的 10 倍");
@@ -144,6 +156,7 @@ function handleMessage(ws: WebSocket, raw: string) {
         sb,
         bb,
         decisionTimeSec,
+        timeBankSec,
       });
       room.onChange = () => broadcast(room);
       room.addPlayer(playerId, name);
@@ -197,7 +210,8 @@ function handleMessage(ws: WebSocket, raw: string) {
       if (!ctx) return sendError(ws, "未加入房间");
       if (ctx.info.playerId !== ctx.room.hostId)
         return sendError(ws, "只有房主可以开始游戏");
-      ctx.room.startHand();
+      const err = ctx.room.startHand();
+      if (err) sendError(ws, err);
       break;
     }
 
@@ -270,6 +284,22 @@ function handleMessage(ws: WebSocket, raw: string) {
       break;
     }
 
+    case "setTimeBank": {
+      const ctx = roomOf(ws);
+      if (!ctx) return sendError(ws, "未加入房间");
+      const err = ctx.room.setTimeBank(ctx.info.playerId, msg.seconds);
+      if (err) sendError(ws, err);
+      break;
+    }
+
+    case "setPaused": {
+      const ctx = roomOf(ws);
+      if (!ctx) return sendError(ws, "未加入房间");
+      const err = ctx.room.setPaused(ctx.info.playerId, msg.paused);
+      if (err) sendError(ws, err);
+      break;
+    }
+
     case "show": {
       const ctx = roomOf(ws);
       if (!ctx) return sendError(ws, "未加入房间");
@@ -296,6 +326,29 @@ function handleMessage(ws: WebSocket, raw: string) {
       for (const [target, info] of clients) {
         if (info.roomCode === ctx.room.code)
           send(target, { t: "emote", event });
+      }
+      break;
+    }
+
+    case "chat": {
+      const ctx = roomOf(ws);
+      if (!ctx) return sendError(ws, "未加入房间");
+      const player = ctx.room.byId(ctx.info.playerId);
+      if (!player) return sendError(ws, "玩家不存在");
+      const text = String(msg.text ?? "")
+        .trim()
+        .slice(0, 120);
+      if (!text) return;
+      const message: ChatMessage = {
+        id: randomUUID(),
+        playerId: player.id,
+        name: player.name,
+        text,
+        at: Date.now(),
+      };
+      for (const [target, info] of clients) {
+        if (info.roomCode === ctx.room.code)
+          send(target, { t: "chat", message });
       }
       break;
     }

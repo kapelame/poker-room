@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type {
+  ChatMessage,
   ClientMsg,
   EmoteEvent,
   RoomState,
@@ -16,6 +17,7 @@ interface PokerStore {
   kicked: boolean;
   lastError: string | null;
   emotes: EmoteEvent[];
+  chatMessages: ChatMessage[];
 }
 
 const initial: PokerStore = {
@@ -27,6 +29,7 @@ const initial: PokerStore = {
   kicked: false,
   lastError: null,
   emotes: [],
+  chatMessages: [],
 };
 
 class PokerClient {
@@ -123,6 +126,7 @@ class PokerClient {
           state: msg.state,
           kicked: false,
           emotes: [],
+          chatMessages: [],
         });
         break;
       case "state":
@@ -145,6 +149,11 @@ class PokerClient {
         this.emoteTimers.set(event.id, timer);
         break;
       }
+      case "chat":
+        this.set({
+          chatMessages: [...this.store.chatMessages, msg.message].slice(-50),
+        });
+        break;
       case "error":
         this.set({ lastError: msg.message });
         break;
@@ -199,6 +208,7 @@ class PokerClient {
       playerId: null,
       state: null,
       emotes: [],
+      chatMessages: [],
     });
   }
 
