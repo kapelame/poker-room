@@ -91,17 +91,32 @@
 @keyframes emote-float {
   from {
     opacity: 0;
-    transform: translateY(8px) scale(0.75);
+    transform: translateY(8px) scale(0.75) rotate(-14deg);
   }
   15% {
     opacity: 1;
+    transform: translateY(0) scale(1.08) rotate(9deg);
+  }
+  35% {
+    transform: translateY(-12px) scale(1.02) rotate(-8deg);
+  }
+  55% {
+    transform: translateY(-22px) scale(1.06) rotate(7deg);
   }
   to {
     opacity: 0;
-    transform: translateY(-42px) scale(1.05);
+    transform: translateY(-42px) scale(1.05) rotate(18deg);
   }
 }
 
 .animate-emote {
   animation: emote-float 2.4s ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-emote {
+    animation: none;
+    opacity: 1;
+    transform: translateY(-8px) scale(1);
+  }
 }
