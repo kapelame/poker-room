@@ -65,6 +65,15 @@ export interface RebuyRequest {
   playerId: string;
   name: string;
   at: number; // 请求时间戳
+  amount: number;
+}
+
+export interface EmoteEvent {
+  id: string;
+  playerId: string;
+  name: string;
+  emoji: string;
+  at: number;
 }
 
 export interface RoomState {
@@ -84,8 +93,11 @@ export interface RoomState {
   handNumber: number;
   log: string[];
   nextHandIn?: number; // 距下一手秒数（结算阶段）
+  decisionTimeSec: number; // 每次行动的决策时间
+  turnDeadline?: number; // 当前行动截止时间（Unix ms）
   scoreboard: ScoreEntry[]; // 记分板（盈亏降序）
   rebuyRequests: RebuyRequest[]; // 待房主审批的买入请求
+  pendingBuyIns: RebuyRequest[]; // 已批准、下一手生效的买入
   /** 当前观看者的实时胜率（0-100），仅在局中未弃牌时提供 */
   equity?: number;
 }
@@ -99,6 +111,7 @@ export type ClientMsg =
       startingChips?: number;
       sb?: number;
       bb?: number;
+      decisionTimeSec?: number;
     }
   | { t: "join"; code: string; name: string; playerId?: string }
   | { t: "start" }
@@ -107,7 +120,9 @@ export type ClientMsg =
   | { t: "rebuyCancel" } // 取消自己的买入申请
   | { t: "rebuyApprove"; playerId: string } // 房主批准
   | { t: "rebuyReject"; playerId: string } // 房主拒绝
+  | { t: "setDecisionTime"; seconds: number } // 房主设置每次决策时间
   | { t: "show"; indices: number[] } // 摊牌阶段亮牌（0/1 为两张手牌的下标）
+  | { t: "emote"; emoji: string } // 向房间发送一个表情
   | { t: "kick"; playerId: string }
   | { t: "leave" };
 
@@ -116,6 +131,7 @@ export type ClientMsg =
 export type ServerMsg =
   | { t: "joined"; code: string; playerId: string; state: RoomState }
   | { t: "state"; state: RoomState }
+  | { t: "emote"; event: EmoteEvent }
   | { t: "error"; message: string }
   | { t: "kicked" };
 

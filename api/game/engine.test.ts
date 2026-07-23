@@ -29,12 +29,22 @@ describe("胜率估算（蒙特卡洛）", () => {
 describe("牌型评估器", () => {
   it("皇家同花顺 > 四条", () => {
     const royal = evaluate7([
-      C(14, "s"), C(13, "s"), C(12, "s"), C(11, "s"), C(10, "s"),
-      C(2, "d"), C(3, "c"),
+      C(14, "s"),
+      C(13, "s"),
+      C(12, "s"),
+      C(11, "s"),
+      C(10, "s"),
+      C(2, "d"),
+      C(3, "c"),
     ]);
     const quads = evaluate7([
-      C(9, "s"), C(9, "h"), C(9, "d"), C(9, "c"), C(14, "d"),
-      C(2, "c"), C(5, "h"),
+      C(9, "s"),
+      C(9, "h"),
+      C(9, "d"),
+      C(9, "c"),
+      C(14, "d"),
+      C(2, "c"),
+      C(5, "h"),
     ]);
     expect(royal.cat).toBe(8);
     expect(handName(royal.score, royal.cat)).toBe("皇家同花顺");
@@ -44,26 +54,92 @@ describe("牌型评估器", () => {
 
   it("轮子顺子 A2345", () => {
     const wheel = evaluate7([
-      C(14, "s"), C(2, "h"), C(3, "d"), C(4, "c"), C(5, "s"),
-      C(9, "d"), C(11, "c"),
+      C(14, "s"),
+      C(2, "h"),
+      C(3, "d"),
+      C(4, "c"),
+      C(5, "s"),
+      C(9, "d"),
+      C(11, "c"),
     ]);
     expect(wheel.cat).toBe(4);
     const sixHigh = evaluate7([
-      C(2, "s"), C(3, "h"), C(4, "d"), C(5, "c"), C(6, "s"),
-      C(9, "d"), C(11, "c"),
+      C(2, "s"),
+      C(3, "h"),
+      C(4, "d"),
+      C(5, "c"),
+      C(6, "s"),
+      C(9, "d"),
+      C(11, "c"),
     ]);
     expect(sixHigh.score).toBeGreaterThan(wheel.score);
   });
 
   it("葫芦 > 同花 > 顺子 > 三条 > 两对 > 一对 > 高牌", () => {
     const mk = (cards: Card[]) => evaluate7(cards).score;
-    const fh = mk([C(10, "s"), C(10, "h"), C(10, "d"), C(4, "c"), C(4, "s"), C(2, "d"), C(7, "c")]);
-    const fl = mk([C(2, "s"), C(6, "s"), C(8, "s"), C(11, "s"), C(13, "s"), C(3, "d"), C(9, "c")]);
-    const st = mk([C(5, "s"), C(6, "h"), C(7, "d"), C(8, "c"), C(9, "s"), C(2, "d"), C(13, "c")]);
-    const tk = mk([C(7, "s"), C(7, "h"), C(7, "d"), C(2, "c"), C(11, "s"), C(3, "d"), C(9, "c")]);
-    const tp = mk([C(8, "s"), C(8, "h"), C(4, "d"), C(4, "c"), C(13, "s"), C(2, "d"), C(7, "c")]);
-    const op = mk([C(12, "s"), C(12, "h"), C(5, "d"), C(6, "c"), C(9, "s"), C(2, "d"), C(3, "c")]);
-    const hc = mk([C(14, "s"), C(10, "h"), C(8, "d"), C(6, "c"), C(4, "s"), C(3, "d"), C(2, "c")]);
+    const fh = mk([
+      C(10, "s"),
+      C(10, "h"),
+      C(10, "d"),
+      C(4, "c"),
+      C(4, "s"),
+      C(2, "d"),
+      C(7, "c"),
+    ]);
+    const fl = mk([
+      C(2, "s"),
+      C(6, "s"),
+      C(8, "s"),
+      C(11, "s"),
+      C(13, "s"),
+      C(3, "d"),
+      C(9, "c"),
+    ]);
+    const st = mk([
+      C(5, "s"),
+      C(6, "h"),
+      C(7, "d"),
+      C(8, "c"),
+      C(9, "s"),
+      C(2, "d"),
+      C(13, "c"),
+    ]);
+    const tk = mk([
+      C(7, "s"),
+      C(7, "h"),
+      C(7, "d"),
+      C(2, "c"),
+      C(11, "s"),
+      C(3, "d"),
+      C(9, "c"),
+    ]);
+    const tp = mk([
+      C(8, "s"),
+      C(8, "h"),
+      C(4, "d"),
+      C(4, "c"),
+      C(13, "s"),
+      C(2, "d"),
+      C(7, "c"),
+    ]);
+    const op = mk([
+      C(12, "s"),
+      C(12, "h"),
+      C(5, "d"),
+      C(6, "c"),
+      C(9, "s"),
+      C(2, "d"),
+      C(3, "c"),
+    ]);
+    const hc = mk([
+      C(14, "s"),
+      C(10, "h"),
+      C(8, "d"),
+      C(6, "c"),
+      C(4, "s"),
+      C(3, "d"),
+      C(2, "c"),
+    ]);
     expect(fh).toBeGreaterThan(fl);
     expect(fl).toBeGreaterThan(st);
     expect(st).toBeGreaterThan(tk);
@@ -73,8 +149,24 @@ describe("牌型评估器", () => {
   });
 
   it("踢脚比较", () => {
-    const a = evaluate7([C(14, "s"), C(14, "h"), C(13, "d"), C(9, "c"), C(5, "s"), C(3, "d"), C(2, "c")]);
-    const b = evaluate7([C(14, "d"), C(14, "c"), C(12, "d"), C(9, "h"), C(5, "h"), C(3, "h"), C(2, "h")]);
+    const a = evaluate7([
+      C(14, "s"),
+      C(14, "h"),
+      C(13, "d"),
+      C(9, "c"),
+      C(5, "s"),
+      C(3, "d"),
+      C(2, "c"),
+    ]);
+    const b = evaluate7([
+      C(14, "d"),
+      C(14, "c"),
+      C(12, "d"),
+      C(9, "h"),
+      C(5, "h"),
+      C(3, "h"),
+      C(2, "h"),
+    ]);
     expect(a.score).toBeGreaterThan(b.score);
   });
 });
@@ -138,18 +230,21 @@ describe("德州扑克引擎", () => {
     const winners = s.players.filter((p) => p.isWinner);
     expect(winners.length).toBeGreaterThanOrEqual(1);
     expect(winners.reduce((a, p) => a + (p.winAmount ?? 0), 0)).toBe(30);
-    // 摊牌后：自己可见自己的牌与牌型；对手的牌默认不亮（null 占位）
+    // 摊牌后：所有未弃牌玩家自动亮出两张手牌。
     const me = s.players.find((p) => p.id === "p0")!;
     expect(me.hole).toHaveLength(2);
     expect(me.handName).toBeTruthy();
-    for (const p of s.players.filter((x) => x.id !== "p0" && x.inHand && !x.folded)) {
-      expect(p.hole).toEqual([null, null]);
-      expect(p.handName).toBeUndefined();
+    for (const p of s.players.filter(
+      (x) => x.id !== "p0" && x.inHand && !x.folded,
+    )) {
+      expect(p.hole?.every((card) => card !== null)).toBe(true);
+      expect(p.shown).toEqual([true, true]);
+      expect(p.handName).toBeTruthy();
     }
     room.dispose();
   });
 
-  it("亮牌机制：摊牌后按张亮出，全亮才公开牌型", async () => {
+  it("亮牌机制：摊牌阶段强制亮出全部手牌", async () => {
     const room = makeRoom(3);
     // 快速打完：全部跟注/看牌到摊牌
     room.applyAction("p0", "call");
@@ -170,16 +265,16 @@ describe("德州扑克引擎", () => {
     expect(room2.showCards("p0", [0])).toContain("结束后");
     room2.dispose();
 
-    // 逐张亮：p1 先亮一张
+    // 进入摊牌时已自动亮牌，重复亮牌请求保持幂等。
     expect(room.showCards("p1", [0])).toBeNull();
     let view = room.toJSON("p0");
     const p1 = view.players.find((p) => p.id === "p1")!;
     expect(p1.hole![0]).not.toBeNull();
-    expect(p1.hole![1]).toBeNull();
-    expect(p1.shown).toEqual([true, false]);
-    expect(p1.handName).toBeUndefined(); // 未全亮不公开牌型
+    expect(p1.hole![1]).not.toBeNull();
+    expect(p1.shown).toEqual([true, true]);
+    expect(p1.handName).toBeTruthy();
 
-    // 再亮第二张 -> 牌型公开
+    // 重复亮牌不改变状态。
     expect(room.showCards("p1", [1])).toBeNull();
     view = room.toJSON("p0");
     const p1b = view.players.find((p) => p.id === "p1")!;
@@ -300,11 +395,14 @@ describe("德州扑克引擎", () => {
         expect(room.toJSON("p0").rebuyRequests).toHaveLength(1);
         expect(room.approveRebuy("p0", "p1")).toBeNull();
       } else {
-        // 房主：直接生效
+        // 房主：自助登记，也在下一手生效
         expect(room.requestRebuy("p0")).toBeNull();
+        expect(room.toJSON("p0").pendingBuyIns).toHaveLength(1);
+        expect(loser.chips).toBe(0);
       }
       s = room.toJSON("p0");
-      expect(s.players.find((p) => p.id === loser.id)!.chips).toBe(1000);
+      expect(s.players.find((p) => p.id === loser.id)!.chips).toBe(0);
+      expect(s.pendingBuyIns).toHaveLength(1);
     }
     // 7 秒后自动开始下一手
     await vi.advanceTimersByTimeAsync(7000);
@@ -332,7 +430,7 @@ describe("德州扑克引擎", () => {
     expect(room.byId("p1")!.chips).toBe(0); // 未批准前筹码不变
 
     // 重复申请报错
-    expect(room.requestRebuy("p1")).toContain("等待房主审批");
+    expect(room.requestRebuy("p1")).toContain("申请已提交");
 
     // 非房主不能审批
     expect(room.approveRebuy("p1", "p1")).toContain("只有房主");
@@ -349,17 +447,22 @@ describe("德州扑克引擎", () => {
     expect(room.toJSON("p0").rebuyRequests).toHaveLength(0);
     expect(room.requestRebuy("p1")).toBeNull();
     expect(room.approveRebuy("p0", "p1")).toBeNull();
-    expect(room.byId("p1")!.chips).toBe(1000);
+    expect(room.byId("p1")!.chips).toBe(0);
+    expect(room.toJSON("p0").pendingBuyIns).toHaveLength(1);
 
-    // 批准后不能再次买入（筹码>0）
-    expect(room.requestRebuy("p1")).toContain("筹码为 0");
+    // 下一手开始时才到账，此时还要扣除盲注。
+    room.startHand();
+    expect(room.byId("p1")!.chips).toBeGreaterThan(0);
+
+    // 买入可以随时再次申请，审批后仍然排到下一手生效。
+    expect(room.requestRebuy("p1")).toBeNull();
 
     // 记分板记账：玩家1 买入 2 次共 2000
     s = room.toJSON("p0");
     const entry = s.scoreboard.find((e) => e.playerId === "p1")!;
     expect(entry.buyIns).toBe(2);
     expect(entry.totalBuyIn).toBe(2000);
-    expect(entry.profit).toBe(1000 - 2000);
+    expect(entry.profit).toBe(-1010); // 下一手已支付 10 大盲
     room.dispose();
   });
 
@@ -388,6 +491,62 @@ describe("德州扑克引擎", () => {
     s = room.toJSON("p0");
     expect(s.handNumber).toBe(2);
     for (const e of s.scoreboard) expect(e.hands).toBe(2);
+    room.dispose();
+  });
+
+  it("中途加入只作为旁观者，下一手才拿牌", () => {
+    const room = makeRoom(2);
+    const before = room.toJSON("p0");
+    const newcomer = room.addPlayer("p2", "中途玩家");
+    const during = room.toJSON("p2");
+    expect(during.handNumber).toBe(before.handNumber);
+    expect(during.players.find((p) => p.id === newcomer.id)?.inHand).toBe(
+      false,
+    );
+    expect(during.players.find((p) => p.id === newcomer.id)?.hole).toEqual([]);
+    room.dispose();
+  });
+
+  it("决策超时会自动看牌或弃牌", async () => {
+    const room = makeRoom(2);
+    expect(room.setDecisionTime("p0", 5)).toBeNull();
+    await vi.advanceTimersByTimeAsync(5000);
+    const state = room.toJSON("p1");
+    expect(state.phase).toBe("showdown");
+    expect(state.log.some((line) => line.includes("超时自动"))).toBe(true);
+    room.dispose();
+  });
+
+  it("踢出当前手玩家不会吞掉其已下注筹码", () => {
+    const room = makeRoom(3);
+    room.applyAction("p0", "call");
+    const before = room.byId("p0")!.handBet;
+    room.removePlayer("p0");
+    expect(room.byId("p0")).toBeTruthy();
+    expect(room.byId("p0")!.folded).toBe(true);
+    expect(room.byId("p0")!.handBet).toBe(before);
+    room.applyAction("p1", "fold");
+    const state = room.toJSON("p2");
+    expect(state.phase).toBe("showdown");
+    expect(state.players.some((p) => p.id === "p0")).toBe(false);
+    room.dispose();
+  });
+
+  it("有筹码时也可以申请买入，批准后下一手生效", () => {
+    const room = new PokerRoom("TEST05", "p0", {
+      startingChips: 1000,
+      sb: 5,
+      bb: 10,
+    });
+    room.addPlayer("p0", "房主");
+    room.addPlayer("p1", "玩家1");
+    const before = room.byId("p1")!.chips;
+    expect(room.requestRebuy("p1")).toBeNull();
+    expect(room.approveRebuy("p0", "p1")).toBeNull();
+    expect(room.byId("p1")!.chips).toBe(before);
+    room.startHand();
+    expect(room.byId("p1")!.chips).toBeLessThan(before + room.startingChips);
+    expect(room.toJSON("p0").pendingBuyIns).toHaveLength(0);
     room.dispose();
   });
 });

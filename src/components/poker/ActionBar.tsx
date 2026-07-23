@@ -8,10 +8,11 @@ import { cn } from "@/lib/utils";
 interface Props {
   state: RoomState;
   me: PublicPlayer;
+  secondsRemaining?: number;
 }
 
 /** 底部操作栏：弃牌 / 看牌 / 跟注 / 加注 / 全下 */
-export function ActionBar({ state, me }: Props) {
+export function ActionBar({ state, me, secondsRemaining }: Props) {
   const [raising, setRaising] = useState(false);
   const [target, setTarget] = useState(0);
 
@@ -58,9 +59,16 @@ export function ActionBar({ state, me }: Props) {
           <span className="text-sm text-neutral-400">
             {toCall > 0 ? "加注到" : "下注"}
           </span>
-          <span className="text-2xl font-bold text-amber-400">
-            {target.toLocaleString()}
-          </span>
+          <div className="flex items-center gap-3">
+            {secondsRemaining != null && (
+              <span className="text-sm font-bold text-red-300">
+                {secondsRemaining}s
+              </span>
+            )}
+            <span className="text-2xl font-bold text-amber-400">
+              {target.toLocaleString()}
+            </span>
+          </div>
         </div>
         <Slider
           value={[target]}
@@ -108,6 +116,11 @@ export function ActionBar({ state, me }: Props) {
 
   return (
     <div className="w-full max-w-xl mx-auto flex gap-2">
+      {secondsRemaining != null && (
+        <div className="absolute -mt-7 right-4 text-xs font-bold text-red-300">
+          剩余 {secondsRemaining} 秒
+        </div>
+      )}
       <Button
         variant="outline"
         className="flex-1 h-12 border-red-500/50 text-red-400 hover:bg-red-500/15 hover:text-red-300 font-bold"

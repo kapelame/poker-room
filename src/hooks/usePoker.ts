@@ -1,5 +1,10 @@
 import { useSyncExternalStore } from "react";
-import type { ClientMsg, RoomState, ServerMsg } from "@contracts/game";
+import type {
+  ClientMsg,
+  EmoteEvent,
+  RoomState,
+  ServerMsg,
+} from "@contracts/game";
 import { buildWebSocketUrl } from "@/lib/server-url";
 
 interface PokerStore {
@@ -10,6 +15,7 @@ interface PokerStore {
   state: RoomState | null;
   kicked: boolean;
   lastError: string | null;
+  emotes: EmoteEvent[];
 }
 
 const initial: PokerStore = {
@@ -20,6 +26,7 @@ const initial: PokerStore = {
   state: null,
   kicked: false,
   lastError: null,
+  emotes: [],
 };
 
 class PokerClient {
@@ -29,6 +36,7 @@ class PokerClient {
   private reconnectDelay = 500;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionalClose = false;
+  private emoteTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** 重连后要恢复的房间会话 */
   private session: { code: string; playerId: string; name: string } | null =
     null;
@@ -114,11 +122,29 @@ class PokerClient {
           playerId: msg.playerId,
           state: msg.state,
           kicked: false,
+          emotes: [],
         });
         break;
       case "state":
         this.set({ state: msg.state });
         break;
+      case "emote": {
+        const event = msg.event;
+        this.set({
+          emotes: [
+            ...this.store.emotes.filter((e) => e.id !== event.id),
+            event,
+          ].slice(-20),
+        });
+        const timer = setTimeout(() => {
+          this.emoteTimers.delete(event.id);
+          this.set({
+            emotes: this.store.emotes.filter((e) => e.id !== event.id),
+          });
+        }, 2600);
+        this.emoteTimers.set(event.id, timer);
+        break;
+      }
       case "error":
         this.set({ lastError: msg.message });
         break;
@@ -172,6 +198,7 @@ class PokerClient {
       roomCode: null,
       playerId: null,
       state: null,
+      emotes: [],
     });
   }
 

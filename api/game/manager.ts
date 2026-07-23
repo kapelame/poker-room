@@ -3,7 +3,7 @@ import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
 import { randomInt, randomUUID } from "node:crypto";
 import { PokerRoom } from "./room";
-import type { ClientMsg, ServerMsg } from "../../contracts/game";
+import type { ClientMsg, EmoteEvent, ServerMsg } from "../../contracts/game";
 import { MAX_PLAYERS } from "../../contracts/game";
 
 /** 任何能监听 upgrade 事件的 HTTP(S) server（Node http / Vite dev server 均可） */
@@ -25,6 +25,20 @@ const clients = new Map<WebSocket, ClientInfo>();
 const emptyTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 const ROOM_IDLE_TTL = 10 * 60 * 1000;
+const DEFAULT_DECISION_TIME_SEC = 30;
+
+const ALLOWED_EMOTES = new Set([
+  "💩",
+  "😂",
+  "🤣",
+  "👍",
+  "👏",
+  "🔥",
+  "😈",
+  "😎",
+  "🤡",
+  "🙈",
+]);
 
 function send(ws: WebSocket, msg: ServerMsg) {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
@@ -62,9 +76,7 @@ function scheduleRoomCleanup(code: string) {
     emptyTimers.delete(code);
     const room = rooms.get(code);
     if (!room) return;
-    const hasConnected = [...clients.values()].some(
-      (i) => i.roomCode === code,
-    );
+    const hasConnected = [...clients.values()].some((i) => i.roomCode === code);
     if (!hasConnected) {
       room.dispose();
       rooms.delete(code);
@@ -99,11 +111,19 @@ function handleMessage(ws: WebSocket, raw: string) {
 
   switch (msg.t) {
     case "create": {
-      const name = String(msg.name ?? "").trim().slice(0, 16);
+      const name = String(msg.name ?? "")
+        .trim()
+        .slice(0, 16);
       if (!name) return sendError(ws, "请输入昵称");
       const startingChips = clamp(msg.startingChips ?? 1000, 100, 100000, 1000);
       const sb = clamp(msg.sb ?? 5, 1, 10000, 5);
       const bb = clamp(msg.bb ?? 10, 2, 20000, 10);
+      const decisionTimeSec = clamp(
+        msg.decisionTimeSec ?? DEFAULT_DECISION_TIME_SEC,
+        5,
+        300,
+        DEFAULT_DECISION_TIME_SEC,
+      );
       if (bb <= sb) return sendError(ws, "大盲必须大于小盲");
       if (startingChips < bb * 10)
         return sendError(ws, "初始筹码至少为大盲的 10 倍");
@@ -114,6 +134,7 @@ function handleMessage(ws: WebSocket, raw: string) {
         startingChips,
         sb,
         bb,
+        decisionTimeSec,
       });
       room.onChange = () => broadcast(room);
       room.addPlayer(playerId, name);
@@ -125,7 +146,9 @@ function handleMessage(ws: WebSocket, raw: string) {
     }
 
     case "join": {
-      const code = String(msg.code ?? "").trim().toUpperCase();
+      const code = String(msg.code ?? "")
+        .trim()
+        .toUpperCase();
       const room = rooms.get(code);
       if (!room) return sendError(ws, "房间不存在，请检查房间码");
 
@@ -146,7 +169,9 @@ function handleMessage(ws: WebSocket, raw: string) {
 
       if (room.players.length >= MAX_PLAYERS)
         return sendError(ws, "房间已满（最多 9 人）");
-      const name = String(msg.name ?? "").trim().slice(0, 16);
+      const name = String(msg.name ?? "")
+        .trim()
+        .slice(0, 16);
       if (!name) return sendError(ws, "请输入昵称");
       const playerId = randomUUID();
       room.addPlayer(playerId, name);
@@ -219,12 +244,41 @@ function handleMessage(ws: WebSocket, raw: string) {
       break;
     }
 
+    case "setDecisionTime": {
+      const ctx = roomOf(ws);
+      if (!ctx) return sendError(ws, "未加入房间");
+      const err = ctx.room.setDecisionTime(ctx.info.playerId, msg.seconds);
+      if (err) sendError(ws, err);
+      break;
+    }
+
     case "show": {
       const ctx = roomOf(ws);
       if (!ctx) return sendError(ws, "未加入房间");
       const indices = Array.isArray(msg.indices) ? msg.indices : [];
       const err = ctx.room.showCards(ctx.info.playerId, indices);
       if (err) sendError(ws, err);
+      break;
+    }
+
+    case "emote": {
+      const ctx = roomOf(ws);
+      if (!ctx) return sendError(ws, "未加入房间");
+      const emoji = String(msg.emoji ?? "").trim();
+      if (!ALLOWED_EMOTES.has(emoji)) return sendError(ws, "这个表情暂不支持");
+      const player = ctx.room.byId(ctx.info.playerId);
+      if (!player) return sendError(ws, "玩家不存在");
+      const event: EmoteEvent = {
+        id: randomUUID(),
+        playerId: player.id,
+        name: player.name,
+        emoji,
+        at: Date.now(),
+      };
+      for (const [target, info] of clients) {
+        if (info.roomCode === ctx.room.code)
+          send(target, { t: "emote", event });
+      }
       break;
     }
 
@@ -236,7 +290,7 @@ function handleMessage(ws: WebSocket, raw: string) {
       if (msg.playerId === ctx.info.playerId)
         return sendError(ws, "不能移出自己");
       const target = [...clients.entries()].find(
-        ([, i]) => i.playerId === msg.playerId,
+        ([, i]) => i.roomCode === ctx.room.code && i.playerId === msg.playerId,
       );
       ctx.room.removePlayer(msg.playerId);
       if (target) {

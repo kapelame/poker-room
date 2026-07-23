@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
+import { useIsMobile } from "@/hooks/use-mobile";
 import {
   Copy,
   Check,
@@ -41,16 +42,57 @@ const PHASE_LABEL: Record<string, string> = {
   showdown: "摊牌",
 };
 
+function playTurnSound() {
+  try {
+    const AudioContextClass =
+      window.AudioContext ??
+      (window as typeof window & { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+    if (!AudioContextClass) return;
+    const context = new AudioContextClass();
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(880, context.currentTime);
+    oscillator.frequency.exponentialRampToValueAtTime(
+      660,
+      context.currentTime + 0.18,
+    );
+    gain.gain.setValueAtTime(0.0001, context.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.16, context.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.22);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start();
+    oscillator.stop(context.currentTime + 0.23);
+    void context.resume().catch(() => undefined);
+    window.setTimeout(() => void context.close(), 500);
+  } catch {
+    // 浏览器禁止自动播放时，行动仍然可以正常进行。
+  }
+}
+
 export default function Room() {
   const { code = "" } = useParams();
   const nav = useNavigate();
-  const { joined, roomCode, playerId, state, wsReady, lastError, kicked } =
-    usePoker();
+  const {
+    joined,
+    roomCode,
+    playerId,
+    state,
+    wsReady,
+    lastError,
+    kicked,
+    emotes,
+  } = usePoker();
   const [name, setName] = useState(poker.savedName);
   const [copied, setCopied] = useState<"code" | "link" | null>(null);
   const [now, setNow] = useState(Date.now());
+  const [decisionSetting, setDecisionSetting] = useState("30");
   const nextHandAtRef = useRef<number>(0);
   const joinTriedRef = useRef(false);
+  const lastTurnSoundRef = useRef("");
+  const isMobile = useIsMobile();
 
   /* ---------- 连接 & 加入 ---------- */
   useEffect(() => {
@@ -96,12 +138,36 @@ export default function Room() {
     }
   }, [state?.nextHandIn]);
 
+  useEffect(() => {
+    if (state?.decisionTimeSec != null) {
+      setDecisionSetting(String(state.decisionTimeSec));
+    }
+  }, [state?.decisionTimeSec]);
+
   const me = state?.players.find((p) => p.id === playerId);
 
   const countdown = useMemo(() => {
     if (state?.nextHandIn == null) return null;
     return Math.max(0, Math.ceil((nextHandAtRef.current - now) / 1000));
   }, [state?.nextHandIn, now]);
+
+  const myTurn =
+    me != null &&
+    state?.turnSeat === me.seat &&
+    ["preflop", "flop", "turn", "river"].includes(state.phase);
+
+  const decisionCountdown = useMemo(() => {
+    if (!state?.turnDeadline) return null;
+    return Math.max(0, Math.ceil((state.turnDeadline - now) / 1000));
+  }, [state?.turnDeadline, now]);
+
+  useEffect(() => {
+    if (!myTurn || !state) return;
+    const key = `${state.handNumber}:${state.phase}:${state.turnSeat}`;
+    if (lastTurnSoundRef.current === key) return;
+    lastTurnSoundRef.current = key;
+    playTurnSound();
+  }, [myTurn, state?.handNumber, state?.phase, state?.turnSeat]);
 
   /* ---------- 渲染 ---------- */
 
@@ -162,17 +228,16 @@ export default function Room() {
 
   const s = state as RoomState;
   const isHost = me!.isHost;
-  const activeCount = s.players.filter((p) => p.chips > 0 && p.connected).length;
+  const activeCount = s.players.filter(
+    (p) =>
+      p.connected &&
+      (p.chips > 0 ||
+        s.pendingBuyIns.some((request) => request.playerId === p.id)),
+  ).length;
   const inLobby = s.phase === "waiting";
-  const myTurn =
-    me != null &&
-    s.turnSeat === me!.seat &&
-    ["preflop", "flop", "turn", "river"].includes(s.phase);
-  const canRebuy =
-    me != null &&
-    me!.chips === 0 &&
-    (!me!.inHand || s.phase === "showdown" || s.phase === "waiting");
   const myRebuyPending = s.rebuyRequests.some((r) => r.playerId === playerId);
+  const myBuyInPending = s.pendingBuyIns.some((r) => r.playerId === playerId);
+  const canRebuy = me != null && !myRebuyPending && !myBuyInPending;
   const canShowCards =
     s.phase === "showdown" &&
     me != null &&
@@ -181,8 +246,7 @@ export default function Room() {
     (me!.hole?.length ?? 0) === 2;
 
   const copy = async (what: "code" | "link") => {
-    const text =
-      what === "code" ? s.code : `${location.origin}/room/${s.code}`;
+    const text = what === "code" ? s.code : `${location.origin}/room/${s.code}`;
     try {
       await navigator.clipboard.writeText(text);
     } catch {
@@ -195,6 +259,15 @@ export default function Room() {
     }
     setCopied(what);
     setTimeout(() => setCopied(null), 1500);
+  };
+
+  const saveDecisionTime = () => {
+    const seconds = Number(decisionSetting);
+    if (!Number.isInteger(seconds) || seconds < 5 || seconds > 300) {
+      toast.error("决策时间需设置为 5 到 300 秒");
+      return;
+    }
+    poker.send({ t: "setDecisionTime", seconds });
   };
 
   /* ---------- 大厅 ---------- */
@@ -240,21 +313,19 @@ export default function Room() {
                   <span className="flex-1 truncate">
                     {p.name}
                     {p.id === playerId && (
-                      <span className="text-emerald-400 text-xs ml-1">(你)</span>
+                      <span className="text-emerald-400 text-xs ml-1">
+                        (你)
+                      </span>
                     )}
                   </span>
-                  {!p.connected && (
-                    <WifiOff className="w-4 h-4 text-red-400" />
-                  )}
+                  {!p.connected && <WifiOff className="w-4 h-4 text-red-400" />}
                   <span className="text-amber-300 text-sm font-semibold">
                     {p.chips.toLocaleString()}
                   </span>
                   {isHost && p.id !== playerId && (
                     <button
                       className="text-neutral-500 hover:text-red-400"
-                      onClick={() =>
-                        poker.send({ t: "kick", playerId: p.id })
-                      }
+                      onClick={() => poker.send({ t: "kick", playerId: p.id })}
                     >
                       <X className="w-4 h-4" />
                     </button>
@@ -268,6 +339,13 @@ export default function Room() {
           </div>
 
           {isHost && <RebuyApprovals state={s} />}
+          {isHost && (
+            <DecisionTimeSetting
+              value={decisionSetting}
+              onChange={setDecisionSetting}
+              onSave={saveDecisionTime}
+            />
+          )}
 
           <div className="flex flex-col items-center gap-3">
             {isHost ? (
@@ -285,9 +363,10 @@ export default function Room() {
                 等待房主开始游戏…
               </div>
             )}
-            {canRebuy && (
+            {(canRebuy || myRebuyPending || myBuyInPending) && (
               <RebuyRequestButton
                 pending={myRebuyPending}
+                approved={myBuyInPending}
                 amount={s.startingChips}
               />
             )}
@@ -326,9 +405,19 @@ export default function Room() {
         }}
         logSlot={<SidePanels state={s} meId={playerId!} isHost={isHost} />}
         extra={
-          <span className="text-xs text-neutral-400">
-            第 {s.handNumber} 手 · {PHASE_LABEL[s.phase]} · 盲注 {s.sb}/{s.bb}
-          </span>
+          <>
+            <span className="text-xs text-neutral-400 hidden sm:inline">
+              第 {s.handNumber} 手 · {PHASE_LABEL[s.phase]} · 盲注 {s.sb}/{s.bb}
+            </span>
+            {isHost && (
+              <DecisionTimeSetting
+                value={decisionSetting}
+                onChange={setDecisionSetting}
+                onSave={saveDecisionTime}
+                compact
+              />
+            )}
+          </>
         }
       />
 
@@ -390,7 +479,7 @@ export default function Room() {
 
         {/* 座位 */}
         {players.map((p, i) => {
-          const pos = posFor(i, 46, 44);
+          const pos = posFor(i, isMobile ? 42 : 46, isMobile ? 32 : 44);
           return (
             <div
               key={p.id}
@@ -403,6 +492,7 @@ export default function Room() {
                 isTurn={s.turnSeat === p.seat}
                 phase={s.phase}
                 equity={p.id === playerId ? s.equity : undefined}
+                emotes={emotes.filter((event) => event.playerId === p.id)}
               />
             </div>
           );
@@ -411,7 +501,7 @@ export default function Room() {
         {/* 下注筹码标记 */}
         {players.map((p, i) => {
           if (p.bet <= 0) return null;
-          const pos = posFor(i, 30, 26);
+          const pos = posFor(i, isMobile ? 27 : 30, isMobile ? 21 : 26);
           return (
             <div
               key={`bet-${p.id}`}
@@ -429,31 +519,43 @@ export default function Room() {
       {/* 底部操作区 */}
       <div className="relative z-30 px-4 pb-4 pt-2 bg-gradient-to-t from-black/80 to-transparent">
         {isHost && <RebuyApprovals state={s} />}
-        {myTurn ? (
-          <ActionBar state={s} me={me!} />
-        ) : (
-          <div className="w-full max-w-xl mx-auto flex items-center justify-center gap-3 h-12">
-            {canRebuy ? (
-              <RebuyRequestButton
-                pending={myRebuyPending}
-                amount={s.startingChips}
-              />
-            ) : s.phase === "showdown" ? (
-              <div className="flex items-center gap-4 flex-wrap justify-center">
-                <span className="text-neutral-400 text-sm">
-                  {countdown != null ? `下一手 ${countdown}s…` : "等待下一手…"}
-                </span>
-                {canShowCards && <ShowCardToggle me={me!} />}
-              </div>
-            ) : turnPlayer ? (
+        <div className="w-full max-w-xl mx-auto flex flex-col items-center gap-2">
+          {me && (
+            <RebuyRequestButton
+              pending={myRebuyPending}
+              approved={myBuyInPending}
+              amount={s.startingChips}
+              compact
+            />
+          )}
+          {myTurn ? (
+            <ActionBar
+              state={s}
+              me={me!}
+              secondsRemaining={decisionCountdown ?? undefined}
+            />
+          ) : s.phase === "showdown" ? (
+            <div className="flex items-center gap-4 flex-wrap justify-center min-h-12">
               <span className="text-neutral-400 text-sm">
-                等待 <b className="text-emerald-300">{turnPlayer.name}</b> 行动…
+                {countdown != null ? `下一手 ${countdown}s…` : "等待下一手…"}
               </span>
-            ) : (
-              <span className="text-neutral-400 text-sm">观战中…</span>
-            )}
-          </div>
-        )}
+              {canShowCards && <ShowCardToggle me={me!} />}
+            </div>
+          ) : (
+            <div className="flex items-center justify-center gap-3 h-12">
+              {turnPlayer ? (
+                <span className="text-neutral-400 text-sm">
+                  等待 <b className="text-emerald-300">{turnPlayer.name}</b>{" "}
+                  行动…
+                  {decisionCountdown != null && `（${decisionCountdown}s）`}
+                </span>
+              ) : (
+                <span className="text-neutral-400 text-sm">观战中…</span>
+              )}
+            </div>
+          )}
+          <QuickEmotes />
+        </div>
       </div>
     </div>
   );
@@ -535,7 +637,10 @@ function SidePanels({
         <SheetHeader>
           <SheetTitle className="text-white">牌局信息</SheetTitle>
         </SheetHeader>
-        <Tabs defaultValue="log" className="mt-2 h-[calc(100%-3rem)] flex flex-col">
+        <Tabs
+          defaultValue="log"
+          className="mt-2 h-[calc(100%-3rem)] flex flex-col"
+        >
           <TabsList className="bg-white/5">
             <TabsTrigger value="log">日志</TabsTrigger>
             <TabsTrigger value="score">
@@ -549,7 +654,10 @@ function SidePanels({
           <TabsContent value="log" className="flex-1 min-h-0 mt-2">
             <LogPanel log={state.log} />
           </TabsContent>
-          <TabsContent value="score" className="flex-1 min-h-0 mt-2 overflow-y-auto">
+          <TabsContent
+            value="score"
+            className="flex-1 min-h-0 mt-2 overflow-y-auto"
+          >
             <Scoreboard state={state} meId={meId} />
           </TabsContent>
           <TabsContent value="players" className="mt-2 space-y-2">
@@ -646,9 +754,7 @@ function Scoreboard({ state, meId }: { state: RoomState; meId: string }) {
                 {e.wins}/{e.hands} 手
               </span>
             </span>
-            <span className="text-right text-neutral-400">
-              ×{e.buyIns}
-            </span>
+            <span className="text-right text-neutral-400">×{e.buyIns}</span>
           </div>
         );
       })}
@@ -659,13 +765,59 @@ function Scoreboard({ state, meId }: { state: RoomState; meId: string }) {
   );
 }
 
+/* ---------- 房主决策时间 ---------- */
+function DecisionTimeSetting({
+  value,
+  onChange,
+  onSave,
+  compact = false,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onSave: () => void;
+  compact?: boolean;
+}) {
+  return (
+    <div
+      className={
+        compact
+          ? "flex items-center gap-1 text-xs text-neutral-400"
+          : "flex items-center gap-2 rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm"
+      }
+    >
+      <span>{compact ? "决策" : "每次决策时间"}</span>
+      <Input
+        type="number"
+        min={5}
+        max={300}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onBlur={onSave}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") onSave();
+        }}
+        className={
+          compact
+            ? "h-7 w-14 border-white/15 bg-white/5 px-1 text-center text-xs text-white"
+            : "h-8 w-20 border-white/15 bg-white/5 px-2 text-center text-white"
+        }
+      />
+      <span>秒</span>
+    </div>
+  );
+}
+
 /* ---------- 买入申请按钮（破产玩家） ---------- */
 function RebuyRequestButton({
   pending,
+  approved,
   amount,
+  compact = false,
 }: {
   pending: boolean;
+  approved: boolean;
   amount: number;
+  compact?: boolean;
 }) {
   if (pending) {
     return (
@@ -684,14 +836,43 @@ function RebuyRequestButton({
       </div>
     );
   }
+  if (approved) {
+    return (
+      <span className="text-emerald-300 text-sm animate-pulse">
+        买入已批准，将在下一手到账（{amount.toLocaleString()} 筹码）
+      </span>
+    );
+  }
   return (
     <Button
-      className="bg-emerald-600 hover:bg-emerald-700 font-bold px-8"
+      size={compact ? "sm" : "default"}
+      className="bg-emerald-600 hover:bg-emerald-700 font-bold px-4 sm:px-8"
       onClick={() => poker.send({ t: "rebuy" })}
     >
       <Coins className="w-4 h-4 mr-1.5" />
-      申请重新买入（{amount.toLocaleString()} 筹码）
+      申请买入（{amount.toLocaleString()}）
     </Button>
+  );
+}
+
+/* ---------- 快捷表情 ---------- */
+function QuickEmotes() {
+  const choices = ["💩", "😂", "👍", "🔥", "😈", "🤡"];
+  return (
+    <div className="flex items-center gap-1 rounded-full border border-white/10 bg-black/35 px-2 py-1">
+      <span className="mr-1 text-[10px] text-neutral-500">丢表情</span>
+      {choices.map((emoji) => (
+        <button
+          key={emoji}
+          type="button"
+          title={`发送 ${emoji}`}
+          className="rounded-full px-1.5 py-0.5 text-lg leading-none transition-transform hover:scale-125 active:scale-95"
+          onClick={() => poker.send({ t: "emote", emoji })}
+        >
+          {emoji}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -700,6 +881,9 @@ function ShowCardToggle({ me }: { me: PublicPlayer }) {
   const hole = me.hole ?? [];
   const shown = me.shown ?? [];
   const allShown = hole.length === 2 && shown[0] && shown[1];
+  if (allShown) {
+    return <span className="text-emerald-300 text-sm">本手已自动亮牌</span>;
+  }
   return (
     <div className="flex items-center gap-2">
       <span className="text-neutral-400 text-xs">亮牌</span>

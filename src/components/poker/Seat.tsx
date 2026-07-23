@@ -1,4 +1,4 @@
-import type { PublicPlayer } from "@contracts/game";
+import type { EmoteEvent, PublicPlayer } from "@contracts/game";
 import { cn } from "@/lib/utils";
 import { PlayingCard } from "./PlayingCard";
 import { Crown, WifiOff } from "lucide-react";
@@ -10,6 +10,7 @@ interface Props {
   phase: string;
   /** 仅我自己的实时胜率（0-100） */
   equity?: number;
+  emotes?: EmoteEvent[];
 }
 
 /** 胜率颜色：低红 / 中琥珀 / 高绿 */
@@ -26,28 +27,52 @@ function equityBar(v: number) {
 }
 
 /** 牌桌座位 */
-export function Seat({ player, isMe, isTurn, phase, equity }: Props) {
+export function Seat({
+  player,
+  isMe,
+  isTurn,
+  phase,
+  equity,
+  emotes = [],
+}: Props) {
   const p = player;
   const inPlay = phase !== "waiting";
   const showCards = inPlay && p.inHand;
   const dimmed = p.folded || !p.connected;
-  const showEquity =
-    isMe && equity != null && inPlay && p.inHand && !p.folded;
+  const showEquity = isMe && equity != null && inPlay && p.inHand && !p.folded;
 
   return (
     <div
       className={cn(
-        "relative flex flex-col items-center gap-1 transition-all duration-300",
+        "relative flex flex-col items-center gap-1 overflow-visible transition-all duration-300",
         dimmed && "opacity-50",
       )}
     >
+      {emotes.length > 0 && (
+        <div className="pointer-events-none absolute -top-16 left-1/2 z-30 flex -translate-x-1/2 flex-col items-center gap-0.5">
+          {emotes.slice(-3).map((event, index) => (
+            <span
+              key={event.id}
+              className="animate-emote rounded-full border border-white/20 bg-black/70 px-2 py-1 text-2xl shadow-lg"
+              style={{ animationDelay: `${index * 60}ms` }}
+            >
+              {event.emoji}
+            </span>
+          ))}
+        </div>
+      )}
       {/* 手牌 */}
-      <div className="flex gap-1 h-11 items-end">
+      <div className="flex min-h-14 items-end gap-1 overflow-visible">
         {showCards &&
           (p.hole
             ? p.hole.map((c, i) =>
                 c ? (
-                  <PlayingCard key={i} card={c} size={isMe ? "md" : "sm"} delay={i * 120} />
+                  <PlayingCard
+                    key={i}
+                    card={c}
+                    size={isMe ? "md" : "sm"}
+                    delay={i * 120}
+                  />
                 ) : (
                   <PlayingCard key={i} hidden size="sm" />
                 ),
@@ -69,7 +94,8 @@ export function Seat({ player, isMe, isTurn, phase, equity }: Props) {
             : "bg-black/45 border-white/15",
           isTurn &&
             "ring-2 ring-emerald-400 shadow-[0_0_18px_rgba(52,211,153,0.7)] scale-105",
-          p.isWinner && "ring-2 ring-yellow-400 shadow-[0_0_22px_rgba(250,204,21,0.8)]",
+          p.isWinner &&
+            "ring-2 ring-yellow-400 shadow-[0_0_22px_rgba(250,204,21,0.8)]",
         )}
       >
         {p.isDealer && (
@@ -82,19 +108,29 @@ export function Seat({ player, isMe, isTurn, phase, equity }: Props) {
         )}
         <div className="text-[13px] font-medium text-white leading-tight max-w-[110px] truncate">
           {p.name}
-          {!p.connected && <WifiOff className="inline w-3 h-3 ml-1 text-red-400" />}
+          {!p.connected && (
+            <WifiOff className="inline w-3 h-3 ml-1 text-red-400" />
+          )}
         </div>
         <div className="text-[12px] text-amber-300 font-semibold leading-tight">
           {p.chips.toLocaleString()}
         </div>
         {showEquity && (
           <div className="mt-0.5" title="基于当前手牌与公共牌的实时胜率估算">
-            <div className={cn("text-[11px] font-bold leading-tight", equityColor(equity!))}>
+            <div
+              className={cn(
+                "text-[11px] font-bold leading-tight",
+                equityColor(equity!),
+              )}
+            >
               胜率 {equity!.toFixed(1)}%
             </div>
             <div className="mt-0.5 h-1 w-full rounded-full bg-white/10 overflow-hidden">
               <div
-                className={cn("h-full rounded-full transition-all duration-500", equityBar(equity!))}
+                className={cn(
+                  "h-full rounded-full transition-all duration-500",
+                  equityBar(equity!),
+                )}
                 style={{ width: `${Math.min(100, Math.max(2, equity!))}%` }}
               />
             </div>

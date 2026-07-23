@@ -38,9 +38,11 @@ export default function Home() {
   const [name, setName] = useState(poker.savedName);
   const [code, setCode] = useState("");
   const [showAdv, setShowAdv] = useState(false);
-  const [startingChips, setStartingChips] = useState(1000);
-  const [sb, setSb] = useState(5);
-  const [bb, setBb] = useState(10);
+  const [startingChips, setStartingChips] = useState("1000");
+  const [sb, setSb] = useState("5");
+  const [bb, setBb] = useState("10");
+  const [decisionTimeSec, setDecisionTimeSec] = useState("30");
+  const [createError, setCreateError] = useState<string | null>(null);
   const [serverUrl, setServerUrl] = useState(getServerUrl);
   const [serverUrlError, setServerUrlError] = useState<string | null>(null);
 
@@ -72,14 +74,36 @@ export default function Home() {
 
   const create = () => {
     if (!validName) return;
+    const chips = Number(startingChips);
+    const smallBlind = Number(sb);
+    const bigBlind = Number(bb);
+    const decisionTime = Number(decisionTimeSec);
+    if (
+      !Number.isInteger(chips) ||
+      !Number.isInteger(smallBlind) ||
+      !Number.isInteger(bigBlind) ||
+      !Number.isInteger(decisionTime) ||
+      chips < 100 ||
+      smallBlind < 1 ||
+      bigBlind <= smallBlind ||
+      chips < bigBlind * 10 ||
+      decisionTime < 5
+    ) {
+      setCreateError(
+        "请检查筹码、盲注和决策时间：大盲需大于小盲，决策时间至少 5 秒",
+      );
+      return;
+    }
+    setCreateError(null);
     poker.savedName = name.trim();
     poker.leaveLocal();
     poker.send({
       t: "create",
       name: name.trim(),
-      startingChips,
-      sb,
-      bb,
+      startingChips: chips,
+      sb: smallBlind,
+      bb: bigBlind,
+      decisionTimeSec: decisionTime,
     });
   };
 
@@ -219,13 +243,17 @@ export default function Home() {
               高级设置（筹码 / 盲注）
             </button>
             {showAdv && (
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 <div className="space-y-1">
                   <Label className="text-xs text-neutral-400">初始筹码</Label>
                   <Input
                     type="number"
                     value={startingChips}
-                    onChange={(e) => setStartingChips(Number(e.target.value))}
+                    min={100}
+                    onChange={(e) => {
+                      setStartingChips(e.target.value);
+                      setCreateError(null);
+                    }}
                     className="bg-white/5 border-white/15 text-white"
                   />
                 </div>
@@ -234,7 +262,11 @@ export default function Home() {
                   <Input
                     type="number"
                     value={sb}
-                    onChange={(e) => setSb(Number(e.target.value))}
+                    min={1}
+                    onChange={(e) => {
+                      setSb(e.target.value);
+                      setCreateError(null);
+                    }}
                     className="bg-white/5 border-white/15 text-white"
                   />
                 </div>
@@ -243,11 +275,32 @@ export default function Home() {
                   <Input
                     type="number"
                     value={bb}
-                    onChange={(e) => setBb(Number(e.target.value))}
+                    min={2}
+                    onChange={(e) => {
+                      setBb(e.target.value);
+                      setCreateError(null);
+                    }}
+                    className="bg-white/5 border-white/15 text-white"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs text-neutral-400">决策秒数</Label>
+                  <Input
+                    type="number"
+                    value={decisionTimeSec}
+                    min={5}
+                    max={300}
+                    onChange={(e) => {
+                      setDecisionTimeSec(e.target.value);
+                      setCreateError(null);
+                    }}
                     className="bg-white/5 border-white/15 text-white"
                   />
                 </div>
               </div>
+            )}
+            {createError && (
+              <p className="text-sm text-red-400">{createError}</p>
             )}
             <Button
               onClick={create}
