@@ -1,11 +1,13 @@
 import type {
   ActionType,
+  BuyInTargets,
   BuyInMode,
   Card,
   Phase,
   PotInfo,
   PublicPlayer,
   RebuyRequest,
+  RoomSettings,
   RoomState,
   ScoreEntry,
   Suit,
@@ -37,7 +39,7 @@ export interface Player {
   timeBankRemaining: number;
 }
 
-/** 记分板统计（跨手累计，玩家离房后清除） */
+/** 记分板统计（跨手累计，玩家离房后仍保留到本房间结束） */
 interface PlayerStats {
   hands: number; // 参与手数
   wins: number; // 赢下手数
@@ -45,8 +47,49 @@ interface PlayerStats {
   totalBuyIn: number; // 累计买入筹码
 }
 
+interface DepartedPlayer {
+  name: string;
+  chips: number;
+}
+
+export interface PokerRoomSnapshot {
+  version: 1;
+  code: string;
+  players: Player[];
+  hostId: string;
+  phase: Phase;
+  sb: number;
+  bb: number;
+  startingChips: number;
+  buyInAmount: number;
+  timeBankSec: number;
+  paused: boolean;
+  deck: Card[];
+  community: Card[];
+  pots: PotInfo[];
+  currentBet: number;
+  minRaise: number;
+  dealerSeat: number;
+  turnSeat: number;
+  handNumber: number;
+  logLines: string[];
+  decisionTimeSec: number;
+  turnUsesTimeBank: boolean;
+  pausedTurn?: { remainingMs: number; usingTimeBank: boolean };
+  turnDeadlineAt?: number;
+  runoutDeadlineAt?: number;
+  nextHandAt?: number;
+  pendingSettings?: RoomSettings;
+  pendingRemoval: string[];
+  stats: Array<[string, PlayerStats]>;
+  departedPlayers?: Array<[string, DepartedPlayer]>;
+  pendingRebuy: Array<[string, RebuyRequest]>;
+  pendingBuyIns: Array<[string, RebuyRequest]>;
+}
+
 const RUNOUT_DELAY = 1400;
 const AUTO_ACTION_DELAY = 600;
+const AUTO_NEXT_HAND_DELAY = 6000;
 const DEFAULT_DECISION_TIME_SEC = 30;
 const MIN_DECISION_TIME_SEC = 5;
 const MAX_DECISION_TIME_SEC = 300;
@@ -54,6 +97,18 @@ const DEFAULT_TIME_BANK_SEC = 30;
 const MAX_TIME_BANK_SEC = 300;
 const MIN_BUY_IN_AMOUNT = 100;
 const MAX_BUY_IN_AMOUNT = 1_000_000;
+const BUY_IN_MODE_LABEL: Record<BuyInMode, string> = {
+  custom: "自定义买入",
+  oneHand: "买入一手",
+  average: "补到均码",
+  leader: "对齐领先",
+};
+
+interface ResolvedBuyIn {
+  amount: number;
+  targetChips?: number;
+  basisName?: string;
+}
 
 function createDeck(): Card[] {
   const suits: Suit[] = ["s", "h", "d", "c"];
@@ -93,10 +148,16 @@ export class PokerRoom {
   private turnUsesTimeBank = false;
   private pausedTurn?: { remainingMs: number; usingTimeBank: boolean };
   private turnDeadlineAt?: number;
+  private runoutDeadlineAt?: number;
+  private nextHandAt?: number;
+  private pendingSettings?: RoomSettings;
   private pendingRemoval = new Set<string>();
+  private persistentScheduling = false;
 
   /** 记分板统计 */
   private stats = new Map<string, PlayerStats>();
+  /** 已离桌玩家的最终筹码，保留在本场总结中。 */
+  private departedPlayers = new Map<string, DepartedPlayer>();
   /** 待房主审批的买入请求 */
   private pendingRebuy = new Map<string, RebuyRequest>();
   /** 已批准、下一手开始时才到账的买入 */
@@ -157,6 +218,7 @@ export class PokerRoom {
   }
 
   private later(fn: () => void, ms: number) {
+    if (this.persistentScheduling) return;
     const t = setTimeout(() => {
       this.timers = this.timers.filter((x) => x !== t);
       fn();
@@ -167,6 +229,77 @@ export class PokerRoom {
   private clearTimers() {
     for (const t of this.timers) clearTimeout(t);
     this.timers = [];
+  }
+
+  /**
+   * HTTP/D1 mode cannot rely on an isolate remaining alive after a request.
+   * Deadlines are therefore advanced lazily by tick() on the next poll/action.
+   */
+  usePersistentScheduling() {
+    this.persistentScheduling = true;
+    this.clearTimers();
+  }
+
+  tick(now = Date.now()): boolean {
+    if (this.paused) return false;
+    let changed = false;
+
+    // A single poll may need to catch up several delayed runout cards.
+    for (let i = 0; i < 8; i++) {
+      if (
+        this.phase === "showdown" &&
+        this.nextHandAt == null &&
+        this.canStartNextHand()
+      ) {
+        this.ensureNextHandScheduled(now);
+        changed = true;
+        continue;
+      }
+
+      if (
+        this.phase === "showdown" &&
+        this.nextHandAt != null &&
+        this.nextHandAt <= now
+      ) {
+        this.nextHandAt = undefined;
+        this.startHand();
+        changed = true;
+        continue;
+      }
+
+      if (
+        this.runoutDeadlineAt != null &&
+        this.runoutDeadlineAt <= now
+      ) {
+        this.runoutDeadlineAt = undefined;
+        this.runoutStep();
+        changed = true;
+        continue;
+      }
+
+      if (
+        this.turnDeadlineAt != null &&
+        this.turnDeadlineAt <= now &&
+        ["preflop", "flop", "turn", "river"].includes(this.phase)
+      ) {
+        const current = this.bySeat(this.turnSeat);
+        if (!current) {
+          this.turnDeadlineAt = undefined;
+          changed = true;
+          break;
+        }
+        this.expireTurn(
+          current,
+          this.turnDeadlineAt,
+          this.turnUsesTimeBank,
+        );
+        changed = true;
+        continue;
+      }
+      break;
+    }
+
+    return changed;
   }
 
   bySeat(seat: number): Player | undefined {
@@ -186,13 +319,11 @@ export class PokerRoom {
     seat: number,
     pred: (p: Player) => boolean,
   ): Player | undefined {
-    const sorted = [...this.players].sort((a, b) => a.seat - b.seat);
-    if (!sorted.length) return undefined;
-    for (let i = 1; i <= sorted.length; i++) {
-      const idx =
-        (sorted.findIndex((p) => p.seat === seat) + i) % sorted.length;
-      const p = sorted[(idx + sorted.length) % sorted.length];
-      if (pred(p)) return p;
+    for (let offset = 1; offset <= MAX_SEATS; offset++) {
+      const candidate = this.bySeat(
+        (seat + offset + MAX_SEATS) % MAX_SEATS,
+      );
+      if (candidate && pred(candidate)) return candidate;
     }
     return undefined;
   }
@@ -205,13 +336,10 @@ export class PokerRoom {
     options: { funded?: boolean } = {},
   ): Player {
     const funded = options.funded ?? this.phase === "waiting";
-    const used = new Set(this.players.map((p) => p.seat));
-    let seat = 0;
-    while (used.has(seat)) seat++;
     const p: Player = {
       id,
       name,
-      seat,
+      seat: -1,
       chips: funded ? this.startingChips : 0,
       bet: 0,
       handBet: 0,
@@ -231,9 +359,40 @@ export class PokerRoom {
       buyIns: funded ? 1 : 0,
       totalBuyIn: funded ? this.startingChips : 0,
     });
-    this.log(funded ? `${name} 加入了牌桌` : `${name} 加入牌桌，等待买入审批`);
-    if (!funded && this.phase !== "waiting") this.requestRebuy(id, "oneHand");
+    this.log(
+      funded
+        ? `${name} 进入房间，等待选择座位`
+        : `${name} 进入房间，等待选座和选择买入方案`,
+    );
     return p;
+  }
+
+  setSeat(id: string, seat: number): string | null {
+    const player = this.byId(id);
+    if (!player) return "玩家不存在";
+    if (!Number.isInteger(seat) || seat < 0 || seat >= MAX_SEATS)
+      return "请选择有效座位";
+    if (player.seat === seat) return null;
+    if (this.bySeat(seat)) return "这个座位已经有人了";
+
+    const activePhase = ["preflop", "flop", "turn", "river"].includes(
+      this.phase,
+    );
+    if (activePhase && player.seat >= 0)
+      return "当前手牌进行中，结算后才能更换座位";
+    if (activePhase && player.inHand)
+      return "当前手牌进行中，无法更换座位";
+
+    const previousSeat = player.seat;
+    player.seat = seat;
+    this.log(
+      previousSeat >= 0
+        ? `${player.name} 从 ${previousSeat + 1} 号位换到 ${seat + 1} 号位`
+        : `${player.name} 坐到 ${seat + 1} 号位`,
+    );
+    this.ensureNextHandScheduled();
+    this.onChange();
+    return null;
   }
 
   removePlayer(id: string) {
@@ -254,8 +413,8 @@ export class PokerRoom {
       if (wasTurn) this.afterTurnLeft();
       else this.checkEarlyEnd();
     } else {
+      this.departedPlayers.set(id, { name: p.name, chips: p.chips });
       this.players = this.players.filter((x) => x.id !== id);
-      this.stats.delete(id);
       this.pendingRebuy.delete(id);
       this.pendingBuyIns.delete(id);
     }
@@ -274,9 +433,13 @@ export class PokerRoom {
   private finalizePendingRemovals() {
     if (!this.pendingRemoval.size) return;
     const ids = this.pendingRemoval;
+    for (const p of this.players) {
+      if (ids.has(p.id)) {
+        this.departedPlayers.set(p.id, { name: p.name, chips: p.chips });
+      }
+    }
     this.players = this.players.filter((p) => !ids.has(p.id));
     for (const id of ids) {
-      this.stats.delete(id);
       this.pendingRebuy.delete(id);
       this.pendingBuyIns.delete(id);
       this.equityCache.delete(id);
@@ -303,41 +466,102 @@ export class PokerRoom {
       }
     } else {
       this.log(`${p.name} 重新连接`);
+      this.ensureNextHandScheduled();
     }
     this.onChange();
+  }
+
+  private currentRoomSettings(): RoomSettings {
+    return {
+      sb: this.sb,
+      bb: this.bb,
+      buyInAmount: this.buyInAmount,
+      decisionTimeSec: this.decisionTimeSec,
+      timeBankSec: this.timeBankSec,
+    };
+  }
+
+  private applyRoomSettings(settings: RoomSettings) {
+    this.sb = settings.sb;
+    this.bb = settings.bb;
+    this.buyInAmount = settings.buyInAmount;
+    this.decisionTimeSec = settings.decisionTimeSec;
+    this.timeBankSec = settings.timeBankSec;
+  }
+
+  private applyPendingSettings() {
+    if (!this.pendingSettings) return;
+    this.applyRoomSettings(this.pendingSettings);
+    this.pendingSettings = undefined;
+  }
+
+  setRoomSettings(
+    hostId: string,
+    settings: RoomSettings,
+  ): string | null {
+    if (hostId !== this.hostId) return "只有房主可以调整牌桌设置";
+    if (!settings || typeof settings !== "object")
+      return "牌桌设置格式不正确";
+    const values = [
+      settings.sb,
+      settings.bb,
+      settings.buyInAmount,
+      settings.decisionTimeSec,
+      settings.timeBankSec,
+    ];
+    if (values.some((value) => !Number.isInteger(value)))
+      return "牌桌设置必须填写整数";
+    if (settings.sb < 1 || settings.sb > 10_000)
+      return "小盲需设置为 1 到 10,000";
+    if (settings.bb < 2 || settings.bb > 20_000 || settings.bb <= settings.sb)
+      return "大盲必须大于小盲";
+    if (
+      settings.buyInAmount < MIN_BUY_IN_AMOUNT ||
+      settings.buyInAmount > MAX_BUY_IN_AMOUNT ||
+      settings.buyInAmount < settings.bb * 10
+    )
+      return "一手买入至少为大盲的 10 倍";
+    if (
+      settings.decisionTimeSec < MIN_DECISION_TIME_SEC ||
+      settings.decisionTimeSec > MAX_DECISION_TIME_SEC
+    )
+      return "决策时间需设置为 5 到 300 秒";
+    if (settings.timeBankSec < 0 || settings.timeBankSec > MAX_TIME_BANK_SEC)
+      return "时间银行需设置为 0 到 300 秒";
+
+    const activePhase = ["preflop", "flop", "turn", "river"].includes(
+      this.phase,
+    );
+    if (activePhase) {
+      this.pendingSettings = { ...settings };
+      this.log("房主更新了牌桌设置，将从下一手生效");
+    } else {
+      this.applyRoomSettings(settings);
+      this.pendingSettings = undefined;
+      for (const player of this.players)
+        player.timeBankRemaining = settings.timeBankSec;
+      this.log(
+        `房主更新牌桌设置：盲注 ${settings.sb}/${settings.bb} · 一手买入 ${settings.buyInAmount}`,
+      );
+    }
+    this.onChange();
+    return null;
   }
 
   setDecisionTime(hostId: string, seconds: number): string | null {
-    if (hostId !== this.hostId) return "只有房主可以设置决策时间";
-    if (!Number.isFinite(seconds)) return "决策时间格式不正确";
-    const value = Math.min(
-      MAX_DECISION_TIME_SEC,
-      Math.max(MIN_DECISION_TIME_SEC, Math.floor(seconds)),
-    );
-    this.decisionTimeSec = value;
-    if (
-      ["preflop", "flop", "turn", "river"].includes(this.phase) &&
-      this.turnSeat >= 0
-    ) {
-      const current = this.bySeat(this.turnSeat);
-      if (current) this.startTurn(current);
-    }
-    this.log(`房主将每次决策时间设置为 ${value} 秒`);
-    this.onChange();
-    return null;
+    const settings = this.pendingSettings ?? this.currentRoomSettings();
+    return this.setRoomSettings(hostId, {
+      ...settings,
+      decisionTimeSec: Math.floor(seconds),
+    });
   }
 
   setTimeBank(hostId: string, seconds: number): string | null {
-    if (hostId !== this.hostId) return "只有房主可以设置时间银行";
-    if (!Number.isFinite(seconds)) return "时间银行格式不正确";
-    const value = Math.min(MAX_TIME_BANK_SEC, Math.max(0, Math.floor(seconds)));
-    this.timeBankSec = value;
-    if (this.phase === "waiting") {
-      for (const p of this.players) p.timeBankRemaining = value;
-    }
-    this.log("房主将每手时间银行设置为 " + value + " 秒");
-    this.onChange();
-    return null;
+    const settings = this.pendingSettings ?? this.currentRoomSettings();
+    return this.setRoomSettings(hostId, {
+      ...settings,
+      timeBankSec: Math.floor(seconds),
+    });
   }
 
   setPaused(hostId: string, paused: boolean): string | null {
@@ -383,20 +607,104 @@ export class PokerRoom {
     return null;
   }
 
+  returnToLobby(hostId: string): string | null {
+    if (hostId !== this.hostId) return "只有房主可以返回大厅";
+    if (this.phase === "waiting") return null;
+    if (this.phase !== "showdown")
+      return "当前手牌进行中，请在本手结算后返回大厅";
+
+    this.clearTimers();
+    this.turnDeadlineAt = undefined;
+    this.runoutDeadlineAt = undefined;
+    this.nextHandAt = undefined;
+    this.turnUsesTimeBank = false;
+    this.pausedTurn = undefined;
+    this.paused = false;
+    this.phase = "waiting";
+    this.deck = [];
+    this.community = [];
+    this.pots = [];
+    this.currentBet = 0;
+    this.turnSeat = -1;
+    this.applyPendingSettings();
+    this.minRaise = this.bb;
+
+    for (const p of this.players) {
+      p.bet = 0;
+      p.handBet = 0;
+      p.folded = false;
+      p.allIn = false;
+      p.hole = [];
+      p.shown = [];
+      p.lastAction = undefined;
+      p.inHand = false;
+      p.hasActed = false;
+      p.handName = undefined;
+      p.winAmount = undefined;
+      p.isWinner = undefined;
+      p.score = undefined;
+      p.timeBankRemaining = this.timeBankSec;
+    }
+    this.equityCache.clear();
+    this.finalizePendingRemovals();
+    const hostName = this.byId(hostId)?.name ?? "房主";
+    this.log(`${hostName} 将牌桌返回大厅`);
+    this.onChange();
+    return null;
+  }
+
   /* ---------------- 游戏流程 ---------------- */
+
+  private canStartNextHand() {
+    return (
+      this.players.filter(
+        (player) =>
+          player.seat >= 0 &&
+          player.connected &&
+          (player.chips > 0 || this.pendingBuyIns.has(player.id)),
+      ).length >= 2
+    );
+  }
+
+  private ensureNextHandScheduled(now = Date.now()) {
+    if (
+      this.phase !== "showdown" ||
+      this.nextHandAt != null ||
+      !this.canStartNextHand()
+    )
+      return;
+    const deadline = now + AUTO_NEXT_HAND_DELAY;
+    this.nextHandAt = deadline;
+    this.later(() => {
+      if (
+        this.phase === "showdown" &&
+        this.nextHandAt === deadline &&
+        Date.now() >= deadline
+      ) {
+        this.nextHandAt = undefined;
+        this.startHand();
+      }
+    }, AUTO_NEXT_HAND_DELAY);
+  }
 
   startHand(): string | null {
     if (this.paused) return "牌局已暂停，请先点击继续";
     if (this.phase !== "waiting" && this.phase !== "showdown") return null;
+    const startingFromShowdown = this.phase === "showdown";
     this.clearTimers();
     this.turnDeadlineAt = undefined;
+    this.runoutDeadlineAt = undefined;
+    this.nextHandAt = undefined;
     this.turnUsesTimeBank = false;
     this.pausedTurn = undefined;
     this.finalizePendingRemovals();
+    this.applyPendingSettings();
     this.applyPendingBuyIns();
-    const eligible = this.players.filter((p) => p.chips > 0 && p.connected);
+    const eligible = this.players.filter(
+      (p) => p.seat >= 0 && p.chips > 0 && p.connected,
+    );
     if (eligible.length < 2) {
-      this.phase = "waiting";
+      this.phase = startingFromShowdown ? "showdown" : "waiting";
       this.onChange();
       return null;
     }
@@ -676,7 +984,7 @@ export class PokerRoom {
     if (canAct.length <= 1) {
       // 所有人全下，自动发完剩余公共牌
       this.turnSeat = -1;
-      this.later(() => this.runoutStep(), RUNOUT_DELAY);
+      this.scheduleRunout();
       this.onChange();
       return;
     }
@@ -687,7 +995,7 @@ export class PokerRoom {
     );
     if (!first) {
       this.turnSeat = -1;
-      this.later(() => this.runoutStep(), RUNOUT_DELAY);
+      this.scheduleRunout();
       this.onChange();
       return;
     }
@@ -697,13 +1005,24 @@ export class PokerRoom {
 
   /** 全下后的自动发牌流程 */
   private runoutStep() {
+    this.runoutDeadlineAt = undefined;
     if (this.phase === "river") {
       this.showdown();
       return;
     }
     this.dealStreet();
     this.onChange();
-    this.later(() => this.runoutStep(), RUNOUT_DELAY);
+    this.scheduleRunout();
+  }
+
+  private scheduleRunout() {
+    const deadline = Date.now() + RUNOUT_DELAY;
+    this.runoutDeadlineAt = deadline;
+    this.later(() => {
+      if (this.runoutDeadlineAt !== deadline) return;
+      this.runoutDeadlineAt = undefined;
+      this.runoutStep();
+    }, RUNOUT_DELAY);
   }
 
   private scheduleAutoAction(p: Player) {
@@ -746,35 +1065,38 @@ export class PokerRoom {
     this.turnDeadlineAt = deadline;
     this.later(
       () => {
-        if (this.turnSeat !== p.seat || this.turnDeadlineAt !== deadline)
-          return;
-        if (!["preflop", "flop", "turn", "river"].includes(this.phase)) return;
-        if (!usingTimeBank && p.timeBankRemaining > 0) {
-          p.lastAction = "时间银行";
-          this.log(p.name + " 用完基础时间，启用时间银行");
-          this.startTurn(p, p.timeBankRemaining * 1000, true);
-          this.onChange();
-          return;
-        }
-        if (usingTimeBank) p.timeBankRemaining = 0;
-        this.turnDeadlineAt = undefined;
-        this.turnUsesTimeBank = false;
-        const toCall = this.currentBet - p.bet;
-        if (toCall <= 0) {
-          p.lastAction = "看牌";
-          p.hasActed = true;
-          this.log(`${p.name} 看牌（超时自动）`);
-        } else {
-          p.folded = true;
-          p.lastAction = "弃牌";
-          p.hasActed = true;
-          this.log(`${p.name} 弃牌（超时自动）`);
-        }
-        this.advance();
+        this.expireTurn(p, deadline, usingTimeBank);
       },
       Math.max(1, durationMs),
     );
     if (!p.connected) this.scheduleAutoAction(p);
+  }
+
+  private expireTurn(p: Player, deadline: number, usingTimeBank: boolean) {
+    if (this.turnSeat !== p.seat || this.turnDeadlineAt !== deadline) return;
+    if (!["preflop", "flop", "turn", "river"].includes(this.phase)) return;
+    if (!usingTimeBank && p.timeBankRemaining > 0) {
+      p.lastAction = "时间银行";
+      this.log(p.name + " 用完基础时间，启用时间银行");
+      this.startTurn(p, p.timeBankRemaining * 1000, true);
+      this.onChange();
+      return;
+    }
+    if (usingTimeBank) p.timeBankRemaining = 0;
+    this.turnDeadlineAt = undefined;
+    this.turnUsesTimeBank = false;
+    const toCall = this.currentBet - p.bet;
+    if (toCall <= 0) {
+      p.lastAction = "看牌";
+      p.hasActed = true;
+      this.log(`${p.name} 看牌（超时自动）`);
+    } else {
+      p.folded = true;
+      p.lastAction = "弃牌";
+      p.hasActed = true;
+      this.log(`${p.name} 弃牌（超时自动）`);
+    }
+    this.advance();
   }
 
   /* ---------------- 结算 ---------------- */
@@ -868,11 +1190,39 @@ export class PokerRoom {
     this.phase = "showdown";
     this.turnSeat = -1;
     this.turnDeadlineAt = undefined;
+    this.runoutDeadlineAt = undefined;
     for (const p of this.inHandPlayers().filter((x) => !x.folded)) {
       p.shown = p.hole.map(() => true);
     }
+    this.logHandSummary();
     this.finalizePendingRemovals();
+    this.ensureNextHandScheduled();
     this.onChange();
+  }
+
+  private logHandSummary() {
+    const participants = this.players.filter((p) => p.inHand);
+    if (!participants.length) return;
+    const signed = (value: number) =>
+      value > 0 ? `+${value.toLocaleString()}` : value.toLocaleString();
+    const changes = participants
+      .map((p) => {
+        const net = (p.winAmount ?? 0) - p.handBet;
+        return `${p.name} ${signed(net)} → ${p.chips.toLocaleString()}`;
+      })
+      .join(" · ");
+    const totals = this.buildScoreboard()
+      .map(
+        (entry) =>
+          `${entry.name} ${entry.chips.toLocaleString()}（总盈亏 ${signed(entry.profit)}）`,
+      )
+      .join(" · ");
+    this.log(`—— 第 ${this.handNumber} 手总结 ——`);
+    if (this.community.length) {
+      this.log(`公共牌：${this.community.map(cardToString).join(" ")}`);
+    }
+    this.log(`本手盈亏：${changes}`);
+    this.log(`牌桌总结：${totals}`);
   }
 
   /* ---------------- 买入（需房主审批） ---------------- */
@@ -884,44 +1234,62 @@ export class PokerRoom {
     return null;
   }
 
-  private validateBuyInAmount(amount: number): number | string {
+  private validateBuyInAmount(
+    amount: number,
+    minimum = MIN_BUY_IN_AMOUNT,
+  ): number | string {
     if (!Number.isFinite(amount)) return "买入金额格式不正确";
     const value = Math.floor(amount);
-    if (value < MIN_BUY_IN_AMOUNT) return `买入金额至少为 ${MIN_BUY_IN_AMOUNT}`;
+    if (value < minimum) return `买入金额至少为 ${minimum}`;
     if (value > MAX_BUY_IN_AMOUNT)
       return `买入金额不能超过 ${MAX_BUY_IN_AMOUNT.toLocaleString()}`;
     return value;
   }
 
-  private averageStack(): number {
-    const stacks = this.players
-      .filter((p) => p.connected && p.chips > 0)
-      .map((p) => p.chips);
-    if (!stacks.length) return this.buyInAmount;
-    return Math.floor(
-      stacks.reduce((sum, chips) => sum + chips, 0) / stacks.length,
+  private currentBuyInTargets(): BuyInTargets {
+    const currentPlayers = this.players.filter(
+      (player) => !this.pendingRemoval.has(player.id),
     );
+    if (!currentPlayers.length) {
+      return {
+        average: this.buyInAmount,
+        leader: this.buyInAmount,
+      };
+    }
+    const average = Math.floor(
+      currentPlayers.reduce((sum, player) => sum + player.chips, 0) /
+        currentPlayers.length,
+    );
+    const chipLeader = currentPlayers.reduce((leader, player) =>
+      player.chips > leader.chips ? player : leader,
+    );
+    return {
+      average,
+      leader: chipLeader.chips,
+      leaderName: chipLeader.name,
+    };
   }
 
-  private resolveBuyInAmount(
+  private resolveBuyIn(
     p: Player,
     mode: BuyInMode = "oneHand",
     customAmount?: number,
-  ): number | string {
+  ): ResolvedBuyIn | string {
     let amount: number;
+    let targetChips: number | undefined;
+    const targets = this.currentBuyInTargets();
     switch (mode) {
       case "custom":
         amount = customAmount ?? Number.NaN;
         break;
-      case "average":
-        amount = this.averageStack() - p.chips;
+      case "average": {
+        targetChips = targets.average;
+        amount = targetChips - p.chips;
         break;
+      }
       case "leader": {
-        const leader = this.players.reduce(
-          (max, player) => Math.max(max, player.chips),
-          p.chips,
-        );
-        amount = leader - p.chips;
+        targetChips = targets.leader;
+        amount = targetChips - p.chips;
         break;
       }
       case "oneHand":
@@ -930,7 +1298,38 @@ export class PokerRoom {
         break;
     }
     if (amount <= 0 && mode !== "custom") return "当前筹码已达到目标，无需买入";
-    return this.validateBuyInAmount(amount);
+    const validated = this.validateBuyInAmount(
+      amount,
+      mode === "average" || mode === "leader" ? 1 : MIN_BUY_IN_AMOUNT,
+    );
+    if (typeof validated === "string") return validated;
+    return {
+      amount: validated,
+      targetChips,
+      basisName: mode === "leader" ? targets.leaderName : undefined,
+    };
+  }
+
+  private describeBuyIn(request: RebuyRequest): string {
+    const approved =
+      request.approvedAmount != null
+        ? `，房主批准补充 ${request.approvedAmount.toLocaleString()}`
+        : "";
+    const base = `${BUY_IN_MODE_LABEL[request.mode]}，申请补充 ${request.amount.toLocaleString()}${approved}`;
+    if (
+      request.targetChips == null ||
+      request.chipsAtRequest == null ||
+      !["average", "leader"].includes(request.mode)
+    ) {
+      return base;
+    }
+    const basis =
+      request.mode === "leader" && request.basisName
+        ? `${request.basisName} 的领先筹码`
+        : request.mode === "average"
+          ? "当前牌桌均码"
+          : "目标";
+    return `${BUY_IN_MODE_LABEL[request.mode]}：${basis} ${request.targetChips.toLocaleString()}（申请时 ${request.chipsAtRequest.toLocaleString()}，申请补充 ${request.amount.toLocaleString()}${approved}）`;
   }
 
   /**
@@ -945,26 +1344,33 @@ export class PokerRoom {
   ): string | null {
     const p = this.byId(id);
     if (!p) return "玩家不存在";
-    if (this.phase === "waiting") return "游戏开始后才能申请买入";
     const err = this.rebuyEligible(p);
     if (err) return err;
-    const amount = this.resolveBuyInAmount(p, mode, customAmount);
-    if (typeof amount === "string") return amount;
+    const resolved = this.resolveBuyIn(p, mode, customAmount);
+    if (typeof resolved === "string") return resolved;
     const request: RebuyRequest = {
       playerId: id,
       name: p.name,
       at: Date.now(),
-      amount,
+      amount: resolved.amount,
       mode,
+      chipsAtRequest: p.chips,
+      targetChips: resolved.targetChips,
+      basisName: resolved.basisName,
     };
     if (id === this.hostId) {
       this.pendingBuyIns.set(id, request);
-      this.log(`${p.name} 买入 ${amount} 已登记，将在下一手到账`);
+      this.log(
+        `${p.name} ${this.describeBuyIn(request)}，已登记，将在下一手到账`,
+      );
+      this.ensureNextHandScheduled();
       this.onChange();
       return null;
     }
     this.pendingRebuy.set(id, request);
-    this.log(`${p.name} 申请买入 ${amount}，等待房主审批`);
+    this.log(
+      `${p.name} 申请${this.describeBuyIn(request)}，等待房主审批`,
+    );
     this.onChange();
     return null;
   }
@@ -984,18 +1390,27 @@ export class PokerRoom {
     const err = this.rebuyEligible(p);
     if (err) return err;
     let approved = req;
-    if (customAmount !== undefined) {
-      const amount = this.validateBuyInAmount(customAmount);
+    if (customAmount !== undefined && customAmount !== req.amount) {
+      const amount = this.validateBuyInAmount(
+        customAmount,
+        req.mode === "average" || req.mode === "leader"
+          ? 1
+          : MIN_BUY_IN_AMOUNT,
+      );
       if (typeof amount === "string") {
         this.pendingRebuy.set(playerId, req);
         return amount;
       }
-      approved = { ...req, amount, mode: "custom" };
+      approved = { ...req, approvedAmount: amount };
+      this.log(
+        `房主将 ${p.name} 的买入从申请补充 ${req.amount.toLocaleString()} 调整为 ${amount.toLocaleString()}`,
+      );
     }
     this.pendingBuyIns.set(playerId, approved);
     this.log(
-      `${p.name} 的买入申请已批准（${approved.amount}），将在下一手到账`,
+      `${p.name} 的买入申请已批准：${this.describeBuyIn(approved)}，将在下一手到账`,
     );
+    this.ensureNextHandScheduled();
     this.onChange();
     return null;
   }
@@ -1006,16 +1421,21 @@ export class PokerRoom {
     const req = this.pendingRebuy.get(playerId);
     if (!req) return null;
     this.pendingRebuy.delete(playerId);
-    this.log(`房主拒绝了 ${req.name} 的买入申请`);
+    this.log(`房主拒绝了 ${req.name} 的买入申请：${this.describeBuyIn(req)}`);
     this.onChange();
     return req.name;
   }
 
   /** 玩家取消自己的买入申请 */
   cancelRebuy(id: string) {
-    if (this.pendingRebuy.delete(id)) {
+    const req = this.pendingRebuy.get(id);
+    if (req && this.pendingRebuy.delete(id)) {
       const p = this.byId(id);
-      if (p) this.log(`${p.name} 取消了买入申请`);
+      if (p) {
+        this.log(
+          `${p.name} 取消了买入申请：${this.describeBuyIn(req)}`,
+        );
+      }
       this.onChange();
     }
   }
@@ -1025,13 +1445,27 @@ export class PokerRoom {
     for (const [playerId, req] of this.pendingBuyIns) {
       const p = this.byId(playerId);
       if (!p) continue;
-      p.chips += req.amount;
+      const amount =
+        req.approvedAmount ??
+        (req.targetChips != null && ["average", "leader"].includes(req.mode)
+          ? Math.max(0, req.targetChips - p.chips)
+          : req.amount);
+      if (amount <= 0) {
+        this.log(
+          `${p.name} 已达到${BUY_IN_MODE_LABEL[req.mode]}目标 ${req.targetChips?.toLocaleString() ?? ""}，本手无需补充`,
+        );
+        continue;
+      }
+      const before = p.chips;
+      p.chips += amount;
       const st = this.stats.get(playerId);
       if (st) {
         st.buyIns++;
-        st.totalBuyIn += req.amount;
+        st.totalBuyIn += amount;
       }
-      this.log(`${p.name} 买入 ${req.amount} 筹码（本手生效）`);
+      this.log(
+        `${p.name} 买入到账：${before.toLocaleString()} + ${amount.toLocaleString()} = ${p.chips.toLocaleString()}（本手生效${req.targetChips != null ? `，申请目标 ${req.targetChips.toLocaleString()}` : ""}）`,
+      );
     }
     this.pendingBuyIns.clear();
   }
@@ -1069,10 +1503,87 @@ export class PokerRoom {
 
   /* ---------------- 状态序列化 ---------------- */
 
+  toSnapshot(): PokerRoomSnapshot {
+    return {
+      version: 1,
+      code: this.code,
+      players: this.players,
+      hostId: this.hostId,
+      phase: this.phase,
+      sb: this.sb,
+      bb: this.bb,
+      startingChips: this.startingChips,
+      buyInAmount: this.buyInAmount,
+      timeBankSec: this.timeBankSec,
+      paused: this.paused,
+      deck: this.deck,
+      community: this.community,
+      pots: this.pots,
+      currentBet: this.currentBet,
+      minRaise: this.minRaise,
+      dealerSeat: this.dealerSeat,
+      turnSeat: this.turnSeat,
+      handNumber: this.handNumber,
+      logLines: this.logLines,
+      decisionTimeSec: this.decisionTimeSec,
+      turnUsesTimeBank: this.turnUsesTimeBank,
+      pausedTurn: this.pausedTurn,
+      turnDeadlineAt: this.turnDeadlineAt,
+      runoutDeadlineAt: this.runoutDeadlineAt,
+      nextHandAt: this.nextHandAt,
+      pendingSettings: this.pendingSettings,
+      pendingRemoval: [...this.pendingRemoval],
+      stats: [...this.stats.entries()],
+      departedPlayers: [...this.departedPlayers.entries()],
+      pendingRebuy: [...this.pendingRebuy.entries()],
+      pendingBuyIns: [...this.pendingBuyIns.entries()],
+    };
+  }
+
+  static fromSnapshot(snapshot: PokerRoomSnapshot): PokerRoom {
+    const room = new PokerRoom(snapshot.code, snapshot.hostId, {
+      startingChips: snapshot.startingChips,
+      buyInAmount: snapshot.buyInAmount,
+      sb: snapshot.sb,
+      bb: snapshot.bb,
+      decisionTimeSec: snapshot.decisionTimeSec,
+      timeBankSec: snapshot.timeBankSec,
+    });
+    room.players = snapshot.players;
+    room.phase = snapshot.phase;
+    room.paused = snapshot.paused;
+    room.deck = snapshot.deck;
+    room.community = snapshot.community;
+    room.pots = snapshot.pots;
+    room.currentBet = snapshot.currentBet;
+    room.minRaise = snapshot.minRaise;
+    room.dealerSeat = snapshot.dealerSeat;
+    room.turnSeat = snapshot.turnSeat;
+    room.handNumber = snapshot.handNumber;
+    room.logLines = snapshot.logLines;
+    room.turnUsesTimeBank = snapshot.turnUsesTimeBank;
+    room.pausedTurn = snapshot.pausedTurn;
+    room.turnDeadlineAt = snapshot.turnDeadlineAt;
+    room.runoutDeadlineAt = snapshot.runoutDeadlineAt;
+    room.nextHandAt = snapshot.nextHandAt;
+    room.pendingSettings = snapshot.pendingSettings;
+    room.pendingRemoval = new Set(snapshot.pendingRemoval);
+    room.stats = new Map(snapshot.stats);
+    room.departedPlayers = new Map(snapshot.departedPlayers ?? []);
+    room.pendingRebuy = new Map(snapshot.pendingRebuy);
+    room.pendingBuyIns = new Map(snapshot.pendingBuyIns);
+    room.usePersistentScheduling();
+    return room;
+  }
+
   toJSON(viewerId: string): RoomState {
     const pot = this.players.reduce((s, p) => s + p.handBet, 0);
     const players: PublicPlayer[] = [...this.players]
-      .sort((a, b) => a.seat - b.seat)
+      .sort(
+        (a, b) =>
+          (a.seat < 0 ? MAX_SEATS : a.seat) -
+          (b.seat < 0 ? MAX_SEATS : b.seat),
+      )
       .map((p) => {
         const isViewer = p.id === viewerId;
         const atShowdown =
@@ -1137,10 +1648,13 @@ export class PokerRoom {
       timeBankSec: this.timeBankSec,
       paused: this.paused,
       handNumber: this.handNumber,
-      log: this.logLines.slice(-40),
+      log: this.logLines.slice(-120),
       decisionTimeSec: this.decisionTimeSec,
       turnDeadline: this.turnDeadlineAt,
+      nextHandAt: this.nextHandAt,
+      pendingSettings: this.pendingSettings,
       scoreboard: this.buildScoreboard(),
+      buyInTargets: this.currentBuyInTargets(),
       rebuyRequests: [...this.pendingRebuy.values()],
       pendingBuyIns: [...this.pendingBuyIns.values()],
       equity: this.viewerEquity(viewerId),
@@ -1150,20 +1664,22 @@ export class PokerRoom {
   /* ---------------- 记分板与胜率 ---------------- */
 
   private buildScoreboard(): ScoreEntry[] {
-    return [...this.players]
-      .map((p) => {
-        const st = this.stats.get(p.id);
-        const totalBuyIn = st?.totalBuyIn ?? this.startingChips;
+    return [...this.stats.entries()]
+      .map(([playerId, st]) => {
+        const player = this.byId(playerId);
+        const departed = this.departedPlayers.get(playerId);
+        const chips = player?.chips ?? departed?.chips ?? 0;
+        const totalBuyIn = st.totalBuyIn;
         return {
-          playerId: p.id,
-          name: p.name,
-          isHost: p.id === this.hostId,
-          connected: p.connected,
-          chips: p.chips,
-          profit: p.chips - totalBuyIn,
-          hands: st?.hands ?? 0,
-          wins: st?.wins ?? 0,
-          buyIns: st?.buyIns ?? 1,
+          playerId,
+          name: player?.name ?? departed?.name ?? "已离桌玩家",
+          isHost: playerId === this.hostId,
+          connected: player?.connected ?? false,
+          chips,
+          profit: chips - totalBuyIn,
+          hands: st.hands,
+          wins: st.wins,
+          buyIns: st.buyIns,
           totalBuyIn,
         };
       })

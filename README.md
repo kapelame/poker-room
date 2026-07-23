@@ -1,60 +1,72 @@
 # Poker Room
 
-一个支持多人房间和 GTO 练习的德州扑克应用，技术栈为 React、Vite、Hono、tRPC、WebSocket 和 MySQL。
+一个可直接在浏览器中玩的多人德州扑克房间，同时提供 GTO 练习模式。
+
+## 功能
+
+- 最多 9 人入座，创建房间后可立即选择座位
+- 新玩家可自选买入金额，由房主审批
+- 支持单手买入、补到当前平均筹码、补到当前筹码领先者
+- 买入申请、审批、到账和每手结果都会记录在日志与总结中
+- 点击其他玩家头像，可向指定玩家投掷带飞行动画的表情
+- 房主可随时调整盲注、买入额、行动时间和时间银行
+- 牌局中的设置变更从下一手生效
+- 摊牌结算后自动倒计时开始下一手
+- 支持暂停、返回大厅、聊天、胜率显示和 GTO 练习
+
+## 技术结构
+
+- React 19 + Next.js 16
+- Vinext + Vite
+- Cloudflare Worker 兼容运行时
+- D1 持久化房间、玩家会话和事件
+- 同源 HTTP 轮询协议，不依赖固定服务器域名
+- Drizzle 管理数据库结构
+
+主要目录：
+
+- `app/`：页面入口和全局样式
+- `src/pages/`：大厅、房间和练习模式
+- `api/game/room.ts`：牌局状态机、买入与结算
+- `worker/`：HTTP 和 Worker 入口
+- `contracts/`：前后端共享协议与牌型计算
+- `drizzle/`：D1 数据库迁移
 
 ## 一键运行
 
-需要先安装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，然后：
-
-- macOS：双击 `start.command`
-- Linux / macOS 终端：运行 `./start.sh`
-- Windows：双击 `start.bat`
-
-启动完成后打开 <http://localhost:3000>。
-
-首次运行会自动构建应用镜像、启动 MySQL，并保存数据库数据到 Docker volume。停止服务：
+需要 Docker Desktop。macOS 双击 `start.command`，Windows 双击 `start.bat`，也可以在终端运行：
 
 ```bash
-docker compose down
+docker compose up --build
 ```
 
-删除本地数据库数据：
-
-```bash
-docker compose down -v
-```
+启动后访问 `http://localhost:3000`。牌局数据保存在 Docker volume 中，停止容器不会丢失。
 
 ## 本地开发
 
+需要 Node.js `>=22.13.0`。
+
 ```bash
 npm ci
+npm run db:migrate:local
 npm run dev
 ```
 
-开发服务器默认运行在 <http://localhost:3000>。本地开发模式不要求配置生产环境变量。
+前端始终通过同源 `/api/poker` 请求牌局接口，不需要配置外部 API 地址。
 
-常用检查：
+## 验证
 
 ```bash
+npm run lint
 npm run check
 npm test
-npm run build
 ```
 
-## 配置
+## Cloudflare 部署
 
-复制 `.env.example` 为 `.env` 后按需修改。默认 Docker Compose 配置使用本地 MySQL；共享部署或公网部署时，请务必替换 `APP_SECRET` 和数据库密码，并通过部署平台的密钥管理功能注入，不要把 `.env` 提交到 Git。
+先创建名为 `poker-room` 的 D1 数据库，将返回的数据库 ID 写入 `wrangler.jsonc`，然后执行：
 
-前端运行后，可在首页点击“配置服务地址”，设置房间后端的 URL。配置会保存在当前浏览器中，HTTP API 和 WebSocket 地址会自动从该 URL 生成；点击“恢复当前站点”可切回同源服务。
-
-## 项目结构
-
-- `src/`：React 页面和组件
-- `api/`：Hono、tRPC 和 WebSocket 服务端
-- `contracts/`：前后端共享类型
-- `db/`：Drizzle schema 和迁移目录
-- `docker-compose.yml`：应用 + MySQL 的一键运行配置
-
-## License
-
-暂未指定许可证。
+```bash
+npm run db:migrate:remote
+npm run deploy
+```

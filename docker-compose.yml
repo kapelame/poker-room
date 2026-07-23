@@ -1,36 +1,11 @@
-name: poker-room
-
 services:
-  db:
-    image: mysql:8.4
-    restart: unless-stopped
-    environment:
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-poker_room}
-      MYSQL_USER: ${MYSQL_USER:-poker}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-poker}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-local-root-password}
-    volumes:
-      - mysql-data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-
   app:
     build: .
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      NODE_ENV: ${NODE_ENV:-production}
-      PORT: ${PORT:-3000}
-      APP_ID: ${APP_ID:-local}
-      APP_SECRET: ${APP_SECRET:-local-development-secret}
-      DATABASE_URL: ${DATABASE_URL:-mysql://poker:poker@db:3306/poker_room}
     ports:
-      - "${PORT:-3000}:3000"
+      - "3000:3000"
+    volumes:
+      - poker-room-data:/app/.wrangler/state
+    restart: unless-stopped
 
 volumes:
-  mysql-data:
+  poker-room-data:

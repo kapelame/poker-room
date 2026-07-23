@@ -1,35 +1,25 @@
-import devServer from "@hono/vite-dev-server"
-import path from "path"
-const __dirname = import.meta.dirname
-import react from "@vitejs/plugin-react"
-import { defineConfig } from "vite"
-import { attachPokerWS } from "./api/game/manager"
+import vinext from "vinext";
+import { defineConfig } from "vite";
 
-// https://vite.dev/config/
-export default defineConfig({
-  plugins: [
-    devServer({ entry: "api/boot.ts", exclude: [/^\/(?!api\/).*$/] }),
-    {
-      name: "poker-ws",
-      configureServer(server) {
-        if (server.httpServer) attachPokerWS(server.httpServer);
-      },
+export default defineConfig(async () => {
+  process.env.WRANGLER_WRITE_LOGS ??= "false";
+  process.env.WRANGLER_LOG_PATH ??= ".wrangler/logs";
+  process.env.MINIFLARE_REGISTRY_PATH ??= ".wrangler/registry";
+
+  // Wrangler snapshots its log path while the Cloudflare plugin is imported.
+  const { cloudflare } = await import("@cloudflare/vite-plugin");
+
+  return {
+    server: {
+      host: "0.0.0.0",
     },
-    react()],
-  server: {
-    port: 3000,
-  },
-  resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
-      "@contracts": path.resolve(__dirname, "./contracts"),
-      "@db": path.resolve(__dirname, "./db"),
-      "db": path.resolve(__dirname, "./db"),
-    },
-  },
-  envDir: path.resolve(__dirname),
-  build: {
-    outDir: path.resolve(__dirname, "dist/public"),
-    emptyOutDir: true,
-  },
+    plugins: [
+      vinext(),
+      cloudflare({
+        viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
+        inspectorPort: false,
+        persistState: { path: ".wrangler/state" },
+      }),
+    ],
+  };
 });

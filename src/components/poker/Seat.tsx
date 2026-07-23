@@ -1,4 +1,4 @@
-import type { EmoteEvent, PublicPlayer } from "@contracts/game";
+import type { PublicPlayer } from "@contracts/game";
 import { cn } from "@/lib/utils";
 import { PlayingCard } from "./PlayingCard";
 import { Crown, WifiOff } from "lucide-react";
@@ -10,7 +10,8 @@ interface Props {
   phase: string;
   /** 仅我自己的实时胜率（0-100） */
   equity?: number;
-  emotes?: EmoteEvent[];
+  onEmoteTarget?: () => void;
+  emoteTargetSelected?: boolean;
 }
 
 /** 胜率颜色：低红 / 中琥珀 / 高绿 */
@@ -33,7 +34,8 @@ export function Seat({
   isTurn,
   phase,
   equity,
-  emotes = [],
+  onEmoteTarget,
+  emoteTargetSelected = false,
 }: Props) {
   const p = player;
   const inPlay = phase !== "waiting";
@@ -48,19 +50,6 @@ export function Seat({
         dimmed && "opacity-50",
       )}
     >
-      {emotes.length > 0 && (
-        <div className="pointer-events-none absolute -top-16 left-1/2 z-30 flex -translate-x-1/2 flex-col items-center gap-0.5">
-          {emotes.slice(-3).map((event, index) => (
-            <span
-              key={event.id}
-              className="animate-emote rounded-full border border-white/20 bg-black/70 px-2 py-1 text-2xl shadow-lg"
-              style={{ animationDelay: `${index * 60}ms` }}
-            >
-              {event.emoji}
-            </span>
-          ))}
-        </div>
-      )}
       {/* 手牌 */}
       <div className="flex min-h-14 items-end gap-1 overflow-visible">
         {showCards &&
@@ -86,12 +75,22 @@ export function Seat({
       </div>
 
       {/* 信息牌 */}
-      <div
+      <button
+        type="button"
+        disabled={!onEmoteTarget}
+        onClick={onEmoteTarget}
+        aria-label={
+          onEmoteTarget ? `向 ${p.name} 丢表情` : `${p.name} 的座位`
+        }
         className={cn(
-          "relative px-3 py-1.5 rounded-xl border backdrop-blur-sm min-w-[92px] text-center transition-all duration-200",
+          "relative min-h-11 min-w-[92px] touch-manipulation rounded-xl border px-3 py-1.5 text-center backdrop-blur-sm transition-all duration-200",
           isMe
             ? "bg-amber-500/20 border-amber-400/60"
             : "bg-black/45 border-white/15",
+          onEmoteTarget &&
+            "cursor-pointer hover:-translate-y-0.5 hover:border-emerald-300/70 hover:bg-emerald-500/15",
+          emoteTargetSelected &&
+            "ring-2 ring-emerald-300 shadow-[0_0_22px_rgba(52,211,153,0.65)]",
           isTurn &&
             "ring-2 ring-emerald-400 shadow-[0_0_18px_rgba(52,211,153,0.7)] scale-105",
           p.isWinner &&
@@ -106,11 +105,14 @@ export function Seat({
         {p.isHost && (
           <Crown className="absolute -top-2.5 -right-2 w-4 h-4 text-yellow-400" />
         )}
-        <div className="text-[13px] font-medium text-white leading-tight max-w-[110px] truncate">
-          {p.name}
-          {!p.connected && (
-            <WifiOff className="inline w-3 h-3 ml-1 text-red-400" />
-          )}
+        <div className="flex items-center justify-center gap-1.5">
+          <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-emerald-400/20 text-[10px] font-black text-emerald-100">
+            {p.name.slice(0, 1).toUpperCase()}
+          </span>
+          <span className="max-w-[82px] truncate text-[13px] font-medium leading-tight text-white">
+            {p.name}
+          </span>
+          {!p.connected && <WifiOff className="h-3 w-3 text-red-400" />}
         </div>
         <div className="text-[12px] text-amber-300 font-semibold leading-tight">
           {p.chips.toLocaleString()}
@@ -151,7 +153,7 @@ export function Seat({
             +{p.winAmount.toLocaleString()}
           </div>
         )}
-      </div>
+      </button>
     </div>
   );
 }

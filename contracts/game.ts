@@ -21,6 +21,7 @@ export type ActionType = "fold" | "check" | "call" | "raise" | "allin";
 export interface PublicPlayer {
   id: string;
   name: string;
+  /** -1 = 已进入房间但尚未选座；0-8 = 牌桌座位 */
   seat: number;
   chips: number; // 剩余筹码
   bet: number; // 本轮已下注
@@ -68,14 +69,34 @@ export interface RebuyRequest {
   playerId: string;
   name: string;
   at: number; // 请求时间戳
-  amount: number;
+  amount: number; // 申请/批准的补充筹码数
   mode: BuyInMode;
+  chipsAtRequest?: number; // 提交申请时的筹码
+  targetChips?: number; // 均码/领先模式锁定的目标筹码
+  basisName?: string; // 对齐领先时，申请时的 chip leader
+  approvedAmount?: number; // 房主手动调整后的固定补充值
+}
+
+export interface BuyInTargets {
+  average: number; // 当前牌桌玩家的平均筹码
+  leader: number; // 当前 chip leader 的筹码
+  leaderName?: string;
+}
+
+export interface RoomSettings {
+  sb: number;
+  bb: number;
+  buyInAmount: number;
+  decisionTimeSec: number;
+  timeBankSec: number;
 }
 
 export interface EmoteEvent {
   id: string;
-  playerId: string;
-  name: string;
+  playerId: string; // 发送者
+  name: string; // 发送者昵称
+  targetPlayerId?: string; // 目标玩家；可选以兼容旧事件
+  targetName?: string;
   emoji: string;
   at: number;
 }
@@ -109,7 +130,10 @@ export interface RoomState {
   log: string[];
   decisionTimeSec: number; // 每次行动的决策时间
   turnDeadline?: number; // 当前行动截止时间（Unix ms）
+  nextHandAt?: number; // 摊牌后自动开始下一手的时间（Unix ms）
+  pendingSettings?: RoomSettings; // 当前手结束后生效的房主设置
   scoreboard: ScoreEntry[]; // 记分板（盈亏降序）
+  buyInTargets: BuyInTargets;
   rebuyRequests: RebuyRequest[]; // 待房主审批的买入请求
   pendingBuyIns: RebuyRequest[]; // 已批准、下一手生效的买入
   /** 当前观看者的实时胜率（0-100），仅在局中未弃牌时提供 */
@@ -129,7 +153,14 @@ export type ClientMsg =
       decisionTimeSec?: number;
       timeBankSec?: number;
     }
-  | { t: "join"; code: string; name: string; playerId?: string }
+  | {
+      t: "join";
+      code: string;
+      name: string;
+      playerId?: string;
+      sessionToken?: string;
+    }
+  | { t: "setSeat"; seat: number } // 选择或更换自己的牌桌座位（0-8）
   | { t: "start" }
   | { t: "action"; action: ActionType; amount?: number }
   | { t: "rebuy"; mode?: BuyInMode; amount?: number } // 申请买入
@@ -138,9 +169,11 @@ export type ClientMsg =
   | { t: "rebuyReject"; playerId: string } // 房主拒绝
   | { t: "setDecisionTime"; seconds: number } // 房主设置每次决策时间
   | { t: "setTimeBank"; seconds: number } // 房主设置每手时间银行
+  | { t: "setRoomSettings"; settings: RoomSettings } // 房主更新牌桌设置
   | { t: "setPaused"; paused: boolean } // 房主暂停/继续
+  | { t: "returnToLobby" } // 房主在一手结算后返回房间大厅
   | { t: "show"; indices: number[] } // 摊牌阶段亮牌（0/1 为两张手牌的下标）
-  | { t: "emote"; emoji: string } // 向房间发送一个表情
+  | { t: "emote"; emoji: string; targetPlayerId: string } // 向指定玩家丢表情
   | { t: "chat"; text: string } // 向房间发送文字消息
   | { t: "kick"; playerId: string }
   | { t: "leave" };
@@ -148,7 +181,13 @@ export type ClientMsg =
 /* ---------------- 服务器 -> 客户端 ---------------- */
 
 export type ServerMsg =
-  | { t: "joined"; code: string; playerId: string; state: RoomState }
+  | {
+      t: "joined";
+      code: string;
+      playerId: string;
+      sessionToken?: string;
+      state: RoomState;
+    }
   | { t: "state"; state: RoomState }
   | { t: "emote"; event: EmoteEvent }
   | { t: "chat"; message: ChatMessage }

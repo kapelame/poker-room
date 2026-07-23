@@ -6,7 +6,7 @@ import type {
   RoomState,
   ServerMsg,
 } from "@contracts/game";
-import { buildWebSocketUrl } from "@/lib/server-url";
+import { buildPokerApiUrl } from "@/lib/server-url";
 
 interface PokerStore {
   wsReady: boolean;
@@ -16,8 +16,50 @@ interface PokerStore {
   state: RoomState | null;
   kicked: boolean;
   lastError: string | null;
+  requesting: "create" | "join" | null;
   emotes: EmoteEvent[];
   chatMessages: ChatMessage[];
+}
+
+interface PokerApiResponse {
+  messages: ServerMsg[];
+  cursor: number;
+}
+
+interface PokerSession {
+  code: string;
+  playerId: string;
+  name: string;
+  sessionToken: string;
+}
+
+const REQUEST_TIMEOUT_MS = 12000;
+
+function storageGet(key: string) {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function storageSet(key: string, value: string) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Storage may be blocked by privacy settings. The live session still works.
+  }
+}
+
+function storageRemove(key: string) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    // Ignore blocked storage so leaving a room never breaks the UI.
+  }
 }
 
 const initial: PokerStore = {
@@ -28,134 +70,176 @@ const initial: PokerStore = {
   state: null,
   kicked: false,
   lastError: null,
+  requesting: null,
   emotes: [],
   chatMessages: [],
 };
 
 class PokerClient {
-  private ws: WebSocket | null = null;
   private store: PokerStore = { ...initial };
   private listeners = new Set<() => void>();
-  private reconnectDelay = 500;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private intentionalClose = false;
+  private session: PokerSession | null = null;
+  private pendingName = "";
+  private cursor = 0;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private pollQueued = false;
+  private requestQueue: Promise<void> = Promise.resolve();
   private emoteTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  /** 重连后要恢复的房间会话 */
-  private session: { code: string; playerId: string; name: string } | null =
-    null;
 
-  /* ---------- store ---------- */
   subscribe = (fn: () => void) => {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
   };
   getSnapshot = () => this.store;
+
   private set(partial: Partial<PokerStore>) {
     this.store = { ...this.store, ...partial };
     for (const fn of this.listeners) fn();
   }
 
-  /* ---------- 连接 ---------- */
   connect() {
-    if (
-      this.ws &&
-      (this.ws.readyState === WebSocket.OPEN ||
-        this.ws.readyState === WebSocket.CONNECTING)
-    )
-      return;
-    const ws = new WebSocket(buildWebSocketUrl());
-    this.ws = ws;
-    this.intentionalClose = false;
-
-    ws.onopen = () => {
-      this.reconnectDelay = 500;
-      this.set({ wsReady: true });
-      // 断线重连：恢复原座位
-      if (this.session) {
-        const raw = localStorage.getItem(`poker:session:${this.session.code}`);
-        const pid = raw ?? this.session.playerId;
-        this.sendRaw({
-          t: "join",
-          code: this.session.code,
-          name: this.session.name,
-          playerId: pid,
-        });
-      }
-    };
-    ws.onmessage = (ev) => {
-      let msg: ServerMsg;
-      try {
-        msg = JSON.parse(ev.data);
-      } catch {
-        return;
-      }
-      this.handle(msg);
-    };
-    ws.onclose = () => {
-      this.set({ wsReady: false });
-      this.ws = null;
-      if (!this.intentionalClose) this.scheduleReconnect();
-    };
-    ws.onerror = () => {
-      ws.close();
-    };
+    if (this.pollTimer) return;
+    this.pollTimer = setInterval(() => this.queuePoll(), 800);
+    this.set({ wsReady: true });
+    this.queuePoll();
   }
 
-  private scheduleReconnect() {
-    if (this.reconnectTimer) return;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, 5000);
-      this.connect();
-    }, this.reconnectDelay);
+  private enqueue(task: () => Promise<void>) {
+    this.requestQueue = this.requestQueue
+      .catch(() => undefined)
+      .then(task)
+      .catch((cause: unknown) => {
+        const timedOut =
+          typeof cause === "object" &&
+          cause !== null &&
+          "name" in cause &&
+          cause.name === "AbortError";
+        this.set({
+          wsReady: false,
+          lastError: timedOut
+            ? "连接超时，请重试"
+            : "网络连接失败，请检查网络后重试",
+          requesting: null,
+        });
+      });
+  }
+
+  private async request(body: Record<string, unknown>) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(
+      () => controller.abort(),
+      REQUEST_TIMEOUT_MS,
+    );
+    try {
+      const response = await fetch(buildPokerApiUrl(), {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      const data = (await response.json()) as PokerApiResponse;
+      return { response, data };
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }
+
+  private async post(body: Record<string, unknown>) {
+    const { response, data } = await this.request(body);
+    this.set({ wsReady: response.status < 500 });
+    this.consume(data);
+  }
+
+  private queuePoll() {
+    if (!this.session || this.pollQueued) return;
+    this.pollQueued = true;
+    this.enqueue(async () => {
+      try {
+        const session = this.session;
+        if (!session) return;
+        const { response, data } = await this.request({
+            poll: true,
+            roomCode: session.code,
+            sessionToken: session.sessionToken,
+            cursor: this.cursor,
+        });
+        this.set({ wsReady: response.status < 500 });
+        this.consume(data);
+      } finally {
+        this.pollQueued = false;
+      }
+    });
+  }
+
+  private consume(data: PokerApiResponse) {
+    if (!data || !Array.isArray(data.messages)) {
+      throw new Error("invalid poker response");
+    }
+    this.cursor = Math.max(0, Number(data.cursor) || 0);
+    for (const message of data.messages) this.handle(message);
   }
 
   private handle(msg: ServerMsg) {
     switch (msg.t) {
-      case "joined":
+      case "joined": {
+        const sessionToken = msg.sessionToken;
+        if (!sessionToken) {
+          this.set({ lastError: "服务器未返回有效会话，请重试" });
+          return;
+        }
         this.session = {
           code: msg.code,
           playerId: msg.playerId,
-          name: this.session?.name ?? "",
+          name: this.pendingName || this.savedName,
+          sessionToken,
         };
-        localStorage.setItem(`poker:session:${msg.code}`, msg.playerId);
+        this.pendingName = "";
+        storageSet(`poker:session:${msg.code}`, sessionToken);
         this.set({
           joined: true,
           roomCode: msg.code,
           playerId: msg.playerId,
           state: msg.state,
           kicked: false,
+          lastError: null,
+          requesting: null,
           emotes: [],
           chatMessages: [],
         });
+        this.queuePoll();
         break;
+      }
       case "state":
         this.set({ state: msg.state });
         break;
       case "emote": {
         const event = msg.event;
-        this.set({
-          emotes: [
-            ...this.store.emotes.filter((e) => e.id !== event.id),
-            event,
-          ].slice(-20),
-        });
+        const existing = this.store.emotes.filter((item) => item.id !== event.id);
+        this.set({ emotes: [...existing, event].slice(-20) });
+        const previous = this.emoteTimers.get(event.id);
+        if (previous) clearTimeout(previous);
         const timer = setTimeout(() => {
           this.emoteTimers.delete(event.id);
           this.set({
-            emotes: this.store.emotes.filter((e) => e.id !== event.id),
+            emotes: this.store.emotes.filter((item) => item.id !== event.id),
           });
-        }, 2600);
+        }, 4500);
         this.emoteTimers.set(event.id, timer);
         break;
       }
       case "chat":
+        if (this.store.chatMessages.some((item) => item.id === msg.message.id))
+          break;
         this.set({
           chatMessages: [...this.store.chatMessages, msg.message].slice(-50),
         });
         break;
       case "error":
-        this.set({ lastError: msg.message });
+        this.set({ lastError: msg.message, requesting: null });
         break;
       case "kicked":
         this.leaveLocal();
@@ -164,28 +248,23 @@ class PokerClient {
     }
   }
 
-  private sendRaw(msg: ClientMsg) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(msg));
-    }
-  }
-
   send(msg: ClientMsg) {
     this.connect();
-    const w = this.ws;
-    if (!w) return;
-    if (w.readyState === WebSocket.OPEN) {
-      w.send(JSON.stringify(msg));
-    } else {
-      // 等连接就绪后再发
-      const t = setInterval(() => {
-        if (w.readyState === WebSocket.OPEN) {
-          clearInterval(t);
-          w.send(JSON.stringify(msg));
-        }
-      }, 50);
-      setTimeout(() => clearInterval(t), 3000);
+    if (msg.t === "create" || msg.t === "join") {
+      this.pendingName = String(msg.name ?? "").trim();
+      this.set({ requesting: msg.t, lastError: null });
     }
+    const session = this.session;
+    const body = {
+      message: msg,
+      roomCode: session?.code,
+      sessionToken: session?.sessionToken,
+      cursor: this.cursor,
+    };
+    this.enqueue(async () => {
+      await this.post(body);
+      this.queuePoll();
+    });
   }
 
   clearError() {
@@ -196,17 +275,20 @@ class PokerClient {
     this.set({ kicked: false });
   }
 
-  /** 本地登出（保持连接，仅清会话） */
   leaveLocal() {
     if (this.session) {
-      localStorage.removeItem(`poker:session:${this.session.code}`);
+      storageRemove(`poker:session:${this.session.code}`);
     }
     this.session = null;
+    this.cursor = 0;
+    this.pendingName = "";
     this.set({
       joined: false,
       roomCode: null,
       playerId: null,
       state: null,
+      lastError: null,
+      requesting: null,
       emotes: [],
       chatMessages: [],
     });
@@ -218,13 +300,15 @@ class PokerClient {
   }
 
   get savedName() {
-    return localStorage.getItem("poker:name") ?? "";
+    return storageGet("poker:name") ?? "";
   }
-  set savedName(v: string) {
-    localStorage.setItem("poker:name", v);
+
+  set savedName(value: string) {
+    storageSet("poker:name", value);
   }
+
   savedSession(code: string) {
-    return localStorage.getItem(`poker:session:${code}`);
+    return storageGet(`poker:session:${code}`);
   }
 }
 

@@ -120,7 +120,7 @@ export function ActionBar({ state, me, secondsRemaining }: Props) {
   }
 
   return (
-    <div className="w-full max-w-xl mx-auto flex gap-2">
+    <div className="relative w-full max-w-xl mx-auto flex gap-2">
       {(secondsRemaining != null || me.timeBankRemaining > 0) && (
         <div className="absolute -mt-7 right-4 flex gap-2 text-xs font-bold">
           {secondsRemaining != null && (
